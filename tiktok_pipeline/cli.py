@@ -22,7 +22,7 @@ from .auth import TokenStore, exchange_code
 from .client import TikTokClient
 from .config import REQUIRED_SCOPES, Settings
 from .prep import DEFAULT_SAFE_ZONE, prepare_clip, validate_for_tiktok
-from .queue import PostQueue, QueueWorker
+from .queue import PostMode, PostQueue, QueueWorker
 
 AUTH_BASE = "https://www.tiktok.com/v2/auth/authorize/"
 
@@ -112,12 +112,19 @@ def cmd_enqueue(args, settings: Settings) -> int:
         video_path=Path(args.video),
         title=args.title,
         privacy_level=args.privacy,
+        mode=args.mode,
         is_aigc=args.aigc,
     )
     if job_id is None:
         print("Already queued (duplicate detected); nothing added.")
         return 0
-    print(f"Queued job {job_id} with privacy_level={args.privacy}")
+
+    if args.mode == PostMode.INBOX.value:
+        print(f"Queued job {job_id} for the TikTok inbox (draft).")
+        print("It will appear as a notification in the app; you write the caption")
+        print("and tap post. No audit needed, and it can be public.")
+    else:
+        print(f"Queued job {job_id} for direct post with privacy_level={args.privacy}")
     return 0
 
 
@@ -137,11 +144,13 @@ def cmd_status(args, settings: Settings) -> int:
     if not rows:
         print("Queue is empty.")
         return 0
-    print(f"{'ID':<5} {'STATUS':<11} {'TRY':<4} {'PRIVACY':<20} FILE")
+    print(f"{'ID':<5} {'STATUS':<11} {'TRY':<4} {'MODE':<7} {'PRIVACY':<20} FILE")
     for job in rows:
+        # Privacy is meaningless for inbox jobs -- the creator picks it in-app.
+        privacy = "-" if job.mode == PostMode.INBOX.value else job.privacy_level
         print(
             f"{job.id:<5} {job.status:<11} {job.attempts:<4} "
-            f"{job.privacy_level:<20} {Path(job.video_path).name}"
+            f"{job.mode:<7} {privacy:<20} {Path(job.video_path).name}"
         )
         if job.last_error:
             print(f"      last error: {job.last_error[:150]}")
@@ -180,7 +189,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--account", required=True)
     p.add_argument("--video", required=True)
     p.add_argument("--title", required=True)
-    p.add_argument("--privacy", default="SELF_ONLY")
+    p.add_argument("--privacy", default="SELF_ONLY", help="direct mode only")
+    p.add_argument(
+        "--mode",
+        choices=[m.value for m in PostMode],
+        default=PostMode.DIRECT.value,
+        help="direct = publish now (needs audit for public); "
+             "inbox = draft for you to finish in the app (no audit)",
+    )
     p.add_argument("--aigc", action="store_true", help="mark as AI-generated content")
     p.set_defaults(fn=cmd_enqueue)
 

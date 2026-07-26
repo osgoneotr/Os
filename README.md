@@ -297,11 +297,33 @@ hashtags beats 15 generic ones. Skip `#fyp` — it does nothing.
 ## 4. Scheduling & Queue
 
 ```bash
-python -m tiktok_pipeline.cli enqueue --account main --video out.mp4 --title "hook here" --privacy SELF_ONLY
+# Draft to your TikTok inbox -- no audit, can be public after you tap post
+python -m tiktok_pipeline.cli enqueue --account main --video out.mp4 --title "hook here" --mode inbox
+
+# Or direct post (needs the audit for anything but SELF_ONLY)
+python -m tiktok_pipeline.cli enqueue --account main --video out.mp4 --title "hook here" --mode direct --privacy SELF_ONLY
+
 python -m tiktok_pipeline.cli work --once     # process one job
 python -m tiktok_pipeline.cli work            # run continuously
 python -m tiktok_pipeline.cli status
 ```
+
+### Two posting modes
+
+| | `--mode inbox` | `--mode direct` |
+|---|---|---|
+| Endpoint | `/v2/post/publish/inbox/video/init/` | `/v2/post/publish/video/init/` |
+| Scope | `video.upload` | `video.publish` |
+| Audit needed | **No** | Yes, for anything but `SELF_ONLY` |
+| Can be public | **Yes**, once you tap post | Only after audit |
+| Caption | You write it in the app | Sent via API |
+| Human step | One tap | None |
+
+`inbox` is the recommended path and the reason it works is precisely the manual
+step: because a human reviews every post, TikTok doesn't gate it behind the
+audit. It sends no `post_info` — TikTok rejects that field here, and the
+creator sets the caption and visibility in TikTok's own editor. The caption you
+pass is kept on the job anyway so it travels with the video, ready to paste.
 
 ### Design notes
 
@@ -334,27 +356,44 @@ from pathlib import Path
 from tiktok_pipeline import Settings, TikTokClient, PostQueue
 
 settings = Settings.from_env()
+queue = PostQueue(settings)
 
-# Check what you're allowed to post
+# Let the account's real permissions pick the route: direct post if the audit
+# has cleared, otherwise the inbox draft, which reaches public either way.
 info = TikTokClient(settings).query_creator_info("main")
-privacy = "PUBLIC_TO_EVERYONE" if info.can_post_publicly else "SELF_ONLY"
 
-PostQueue(settings).enqueue(
-    account="main",
-    video_path=Path("out/clip_01.mp4"),
-    title="the hook goes here #niche",
-    privacy_level=privacy,
-    is_aigc=True,   # disclose synthetic content
-)
+if info.can_post_publicly:
+    queue.enqueue(
+        account="main",
+        video_path=Path("out/clip_01.mp4"),
+        title="the hook goes here #niche",
+        mode="direct",
+        privacy_level="PUBLIC_TO_EVERYONE",
+        is_aigc=True,      # disclose synthetic content
+    )
+else:
+    queue.enqueue(
+        account="main",
+        video_path=Path("out/clip_01.mp4"),
+        title="the hook goes here #niche",   # kept for you to paste in-app
+        mode="inbox",
+        is_aigc=True,
+    )
 ```
 
 ### Posting times
 
-Defaults are 07:00, 12:00, 17:00, 20:00, 22:00 local, jittered. These are
-generic starting points — **replace them with your own analytics within two
-weeks.** Your audience's timezone distribution matters far more than any
-published "best time to post" table. TikTok Studio → Analytics → Followers
-shows when yours are active.
+Defaults are 07:00, 12:00, 17:00, 20:00, 22:00 local. Each slot opens at a
+pseudo-random offset of up to 45 minutes into the hour, so posts land at
+17:23 one day and 17:08 the next rather than on the hour every day — posting at
+exactly `:00` daily is a bot signature. The offset is derived by hashing the
+date and hour, so it is stable across restarts (a crash can't reroll it into
+posting early) but differs day to day. Set `jitter_minutes=0` to disable.
+
+These hours are generic starting points — **replace them with your own
+analytics within two weeks.** Your audience's timezone distribution matters far
+more than any published "best time to post" table. TikTok Studio → Analytics →
+Followers shows when yours are active.
 
 ---
 
@@ -366,11 +405,11 @@ All three keep you inside the ToS. Ranked by what I'd actually do.
 
 Automate everything up to publishing; a human taps post.
 
-**Route 1 — `video.upload` scope (no audit needed).** Uploads land in the
-creator's TikTok inbox as drafts. You open the app, review, tap publish. Full
-public visibility, no audit, fully ToS-compliant. This is the closest legitimate
-thing to what you asked for, and it's the reason `video.upload` is worth
-requesting alongside `video.publish`.
+**Route 1 — `video.upload` scope (no audit needed). Implemented here as
+`--mode inbox`.** Uploads land in the creator's TikTok inbox as drafts. You open
+the app, review, tap publish. Full public visibility, no audit, fully
+ToS-compliant. This is the closest legitimate thing to what you asked for, and
+it's the reason `video.upload` is worth requesting alongside `video.publish`.
 
 **Route 2 — TikTok Studio native scheduler (free).** Schedule up to 10 days
 ahead from [tiktokstudio.com](https://www.tiktok.com/tiktokstudio) on desktop
@@ -427,7 +466,9 @@ tiktok_pipeline/
 ├── prep.py         ffmpeg: 9:16, safe zones, burned captions
 └── cli.py          login / check / prep / enqueue / work / status
 tests/
-└── test_pipeline.py
+├── test_pipeline.py   queue, rate limits, chunking, validation  (fast)
+├── test_api.py        API wire format against a stubbed transport (fast)
+└── test_prep.py       real ffmpeg renders, pixel inspection      (~100s)
 ```
 
 **Requires ffmpeg** on PATH for the prep stage (`apt-get install ffmpeg` /
@@ -438,9 +479,20 @@ pip install -r requirements.txt
 python -m pytest tests/ -q
 ```
 
-`tests/test_pipeline.py` is pure logic and runs in under a second.
-`tests/test_prep.py` shells out to real ffmpeg and takes ~100s, because the
-only honest way to verify this stage is to render video and inspect pixels.
+`test_pipeline.py` and `test_api.py` are pure logic and run in ~1s.
+`test_prep.py` shells out to real ffmpeg and takes ~100s, because the only
+honest way to verify that stage is to render video and inspect pixels.
+
+`test_api.py` drives the client through a stubbed transport and asserts on wire
+format — request bodies, `Content-Range` headers, poll sequencing, token
+rotation. Testing those against the live API would need real credentials, would
+post actual videos to a real account, and would exhaust the unaudited
+5-posts-per-24h cap on every run.
+
+```bash
+python -m pytest tests/ -q                      # everything
+python -m pytest tests/ -q --ignore=tests/test_prep.py   # fast subset
+```
 
 Set `TIKTOK_DRY_RUN=1` to exercise the whole flow — auth, validation, chunk
 planning — without uploading anything.

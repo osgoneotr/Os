@@ -296,6 +296,29 @@ class TikTokClient:
                 if on_progress:
                     on_progress(idx, chunk_count)
 
+    def init_inbox_upload(self, account: str, file_size: int) -> dict[str, Any]:
+        """Init an upload to the creator's TikTok inbox (draft).
+
+        Deliberately sends no ``post_info``: TikTok rejects it here, and the
+        creator writes the caption and picks visibility in the app. That manual
+        step is exactly why this path needs no audit -- a human reviews every
+        post -- so it is the compliant route to a *public* post while the
+        direct-post client is still unaudited.
+        """
+        chunk_size, chunk_count = plan_chunks(file_size)
+        payload = {
+            "source_info": {
+                "source": "FILE_UPLOAD",
+                "video_size": file_size,
+                "chunk_size": chunk_size,
+                "total_chunk_count": chunk_count,
+            }
+        }
+        data = self._post(config.INBOX_INIT_URL, account, payload)
+        data["_chunk_size"] = chunk_size
+        data["_chunk_count"] = chunk_count
+        return data
+
     def fetch_status(self, account: str, publish_id: str) -> dict[str, Any]:
         """Step 4 (single poll)."""
         return self._post(config.STATUS_FETCH_URL, account, {"publish_id": publish_id})
@@ -340,10 +363,12 @@ class TikTokClient:
         req: PostRequest,
         on_progress: Callable[[int, int], None] | None = None,
     ) -> dict[str, Any]:
-        """Full flow with the mandatory precondition and validation baked in."""
+        """Direct post: publishes to the account. Needs the audited scope."""
         if not req.video_path.exists():
             raise ComplianceError(f"Video not found: {req.video_path}")
 
+        # creator_info is a required precondition for direct post, and the only
+        # way to learn which privacy levels this account may actually use.
         info = self.query_creator_info(account)
         validate_request(req, info)
 
@@ -353,6 +378,7 @@ class TikTokClient:
             chunk_size, chunk_count = plan_chunks(file_size)
             return {
                 "dry_run": True,
+                "mode": "direct",
                 "creator": info.nickname,
                 "privacy_level": req.privacy_level,
                 "chunks": chunk_count,
@@ -361,10 +387,51 @@ class TikTokClient:
             }
 
         init = self.init_video_post(account, req, file_size)
+        return self._transfer_and_wait(account, init, req.video_path, on_progress)
+
+    def upload_to_inbox(
+        self,
+        account: str,
+        req: PostRequest,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> dict[str, Any]:
+        """Send the video to the creator's inbox as a draft.
+
+        No audit required and no visibility cap -- the creator finishes the
+        post by hand in the app. ``req.title`` is ignored by TikTok here; keep
+        it on the job anyway so the caption you drafted travels with the video
+        and can be pasted in.
+        """
+        if not req.video_path.exists():
+            raise ComplianceError(f"Video not found: {req.video_path}")
+
+        file_size = req.video_path.stat().st_size
+
+        if self.settings.dry_run:
+            chunk_size, chunk_count = plan_chunks(file_size)
+            return {
+                "dry_run": True,
+                "mode": "inbox",
+                "chunks": chunk_count,
+                "chunk_size": chunk_size,
+                "bytes": file_size,
+            }
+
+        init = self.init_inbox_upload(account, file_size)
+        return self._transfer_and_wait(account, init, req.video_path, on_progress)
+
+    def _transfer_and_wait(
+        self,
+        account: str,
+        init: dict[str, Any],
+        video_path: Path,
+        on_progress: Callable[[int, int], None] | None,
+    ) -> dict[str, Any]:
+        """Shared upload + poll tail for both posting modes."""
         publish_id = init["publish_id"]
         self.upload_video(
             init["upload_url"],
-            req.video_path,
+            video_path,
             init["_chunk_size"],
             init["_chunk_count"],
             on_progress=on_progress,

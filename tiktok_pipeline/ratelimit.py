@@ -15,6 +15,7 @@ want it to.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -65,14 +66,35 @@ class TokenBucket:
 
 
 class PostingWindow:
-    """Enforces posts/day, minimum spacing, and allowed posting hours."""
+    """Enforces posts/day, minimum spacing, allowed hours, and slot jitter."""
 
-    def __init__(self, limits: RateLimits, state_dir: Path, posting_hours: tuple[int, ...]):
+    def __init__(
+        self,
+        limits: RateLimits,
+        state_dir: Path,
+        posting_hours: tuple[int, ...],
+        jitter_key: str = "default",
+    ):
         self.limits = limits
         self.posting_hours = posting_hours
+        self.jitter_key = jitter_key
         self.path = Path(state_dir) / "posting_history.json"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+
+    def slot_offset_minutes(self, when: datetime) -> int:
+        """Minutes into the hour that this slot unlocks.
+
+        Derived by hashing the date and hour, so it is stable across restarts
+        (a process bounce cannot reroll it into posting early) but differs from
+        day to day. Posting at exactly :00 daily is a bot signature; this is the
+        cheapest way to not look like one.
+        """
+        if self.limits.jitter_minutes <= 0:
+            return 0
+        seed = f"{self.jitter_key}:{when:%Y-%m-%d}:{when.hour}"
+        digest = hashlib.sha256(seed.encode()).digest()
+        return int.from_bytes(digest[:4], "big") % self.limits.jitter_minutes
 
     def _load(self) -> list[float]:
         if not self.path.exists():
@@ -109,9 +131,19 @@ class PostingWindow:
                 remaining = int(self.limits.min_seconds_between_posts - gap)
                 return False, f"minimum spacing not met ({remaining}s remaining)"
 
-        hour = datetime.fromtimestamp(now).hour
-        if self.posting_hours and hour not in self.posting_hours:
-            return False, f"outside posting hours (now {hour:02d}:00, allowed {self.posting_hours})"
+        when = datetime.fromtimestamp(now)
+        if self.posting_hours:
+            if when.hour not in self.posting_hours:
+                return False, (
+                    f"outside posting hours (now {when.hour:02d}:00, "
+                    f"allowed {self.posting_hours})"
+                )
+            offset = self.slot_offset_minutes(when)
+            if when.minute < offset:
+                return False, (
+                    f"slot opens at {when.hour:02d}:{offset:02d} "
+                    f"(jitter); now {when.hour:02d}:{when.minute:02d}"
+                )
 
         return True, "ok"
 
@@ -132,9 +164,18 @@ class PostingWindow:
 
         if self.posting_hours:
             for _ in range(48):  # scan forward at most two days
-                if datetime.fromtimestamp(candidate).hour in self.posting_hours:
-                    break
                 dt = datetime.fromtimestamp(candidate)
+                if dt.hour in self.posting_hours:
+                    slot_open = dt.replace(
+                        minute=self.slot_offset_minutes(dt), second=0, microsecond=0
+                    ).timestamp()
+                    if candidate <= slot_open:
+                        candidate = slot_open
+                        break
+                    # Past this slot's jittered opening but still inside the
+                    # hour: it is open now, so the candidate already stands.
+                    if dt.minute >= self.slot_offset_minutes(dt):
+                        break
                 candidate = dt.replace(minute=0, second=0, microsecond=0).timestamp() + 3600
 
         return candidate

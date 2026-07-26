@@ -16,7 +16,14 @@ from pathlib import Path
 API_BASE = "https://open.tiktokapis.com/v2"
 
 CREATOR_INFO_URL = f"{API_BASE}/post/publish/creator_info/query/"
+# Direct post -- publishes straight to the account. Needs the audited
+# video.publish scope, and is visibility-capped to SELF_ONLY until you pass.
 VIDEO_INIT_URL = f"{API_BASE}/post/publish/video/init/"
+# Inbox upload -- lands as a draft for the creator to finish in the app.
+# Needs only video.upload, which is NOT gated behind the audit, so this is the
+# path that reaches a public post without one. Takes no post_info: the caption
+# is written by the creator in TikTok's own editor.
+INBOX_INIT_URL = f"{API_BASE}/post/publish/inbox/video/init/"
 STATUS_FETCH_URL = f"{API_BASE}/post/publish/status/fetch/"
 TOKEN_URL = f"{API_BASE}/oauth/token/"
 
@@ -55,6 +62,10 @@ class RateLimits:
     requests_per_minute: int = 6
     posts_per_day: int = 5
     min_seconds_between_posts: int = 45 * 60
+    # Posts land at a pseudo-random offset into the allowed hour rather than on
+    # the hour. Posting at exactly :00 every day is a bot signature; this keeps
+    # the schedule human without making it unpredictable to you.
+    jitter_minutes: int = 45
 
 
 @dataclass(frozen=True)

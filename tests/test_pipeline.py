@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -375,3 +376,105 @@ def test_orphaned_inflight_goes_to_blocked_not_pending(tmp_path):
 
     assert queue.requeue_stale_inflight(older_than=3600) == 1
     assert [j.status for j in queue.list_jobs()] == ["BLOCKED"]
+
+
+# ---- posting-time jitter --------------------------------------------
+
+def test_slot_offset_is_stable_across_restarts(tmp_path):
+    """A process bounce must not reroll the offset into posting early."""
+    limits = RateLimits(jitter_minutes=45)
+    when = datetime(2026, 7, 26, 17, 0)
+    a = PostingWindow(limits, tmp_path, (17,), jitter_key="acct").slot_offset_minutes(when)
+    b = PostingWindow(limits, tmp_path, (17,), jitter_key="acct").slot_offset_minutes(when)
+    assert a == b
+
+
+def test_slot_offset_varies_by_day(tmp_path):
+    """Same hour every day at the same minute is the bot signature we avoid."""
+    limits = RateLimits(jitter_minutes=45)
+    w = PostingWindow(limits, tmp_path, (17,), jitter_key="acct")
+    offsets = {w.slot_offset_minutes(datetime(2026, 7, d, 17, 0)) for d in range(1, 29)}
+    assert len(offsets) > 5, f"offsets barely vary across a month: {offsets}"
+    assert all(0 <= o < 45 for o in offsets)
+
+
+def test_posting_blocked_before_jittered_slot_opens(tmp_path):
+    limits = RateLimits(posts_per_day=10, min_seconds_between_posts=0, jitter_minutes=45)
+    w = PostingWindow(limits, tmp_path, (17,), jitter_key="acct")
+    day = datetime(2026, 7, 26, 17, 0)
+    offset = w.slot_offset_minutes(day)
+    if offset == 0:
+        pytest.skip("this slot happens to open on the hour")
+
+    before = day.replace(minute=offset - 1).timestamp()
+    after = day.replace(minute=offset).timestamp()
+
+    allowed, reason = w.check(before)
+    assert not allowed and "jitter" in reason
+    assert w.check(after)[0]
+
+
+def test_jitter_disabled_allows_posting_on_the_hour(tmp_path):
+    limits = RateLimits(posts_per_day=10, min_seconds_between_posts=0, jitter_minutes=0)
+    w = PostingWindow(limits, tmp_path, (17,))
+    assert w.check(datetime(2026, 7, 26, 17, 0).timestamp())[0]
+
+
+def test_next_allowed_time_lands_on_an_open_slot(tmp_path):
+    limits = RateLimits(posts_per_day=10, min_seconds_between_posts=0, jitter_minutes=45)
+    w = PostingWindow(limits, tmp_path, (7, 12, 17), jitter_key="acct")
+    # 03:00 -- before every slot that day.
+    nxt = w.next_allowed_time(datetime(2026, 7, 26, 3, 0).timestamp())
+    allowed, reason = w.check(nxt)
+    assert allowed, f"next_allowed_time returned a blocked moment: {reason}"
+    assert datetime.fromtimestamp(nxt).hour in (7, 12, 17)
+
+
+# ---- posting mode ----------------------------------------------------
+
+def test_enqueue_defaults_to_direct_mode(tmp_path):
+    queue = PostQueue(_settings(tmp_path))
+    queue.enqueue("main", _video(tmp_path), "t")
+    assert next(queue.list_jobs()).mode == "direct"
+
+
+def test_enqueue_accepts_inbox_mode(tmp_path):
+    queue = PostQueue(_settings(tmp_path))
+    queue.enqueue("main", _video(tmp_path), "t", mode="inbox")
+    assert next(queue.list_jobs()).mode == "inbox"
+
+
+def test_unknown_mode_rejected(tmp_path):
+    queue = PostQueue(_settings(tmp_path))
+    with pytest.raises(ValueError, match="mode must be one of"):
+        queue.enqueue("main", _video(tmp_path), "t", mode="telepathy")
+
+
+def test_existing_database_gains_mode_column(tmp_path):
+    """A queue.db written before `mode` existed must keep working."""
+    import sqlite3
+
+    state = tmp_path / "state"
+    state.mkdir()
+    legacy = sqlite3.connect(state / "queue.db")
+    legacy.executescript(
+        """CREATE TABLE jobs (
+             id INTEGER PRIMARY KEY AUTOINCREMENT, idem_key TEXT NOT NULL UNIQUE,
+             account TEXT NOT NULL, video_path TEXT NOT NULL, title TEXT NOT NULL,
+             privacy_level TEXT NOT NULL, options_json TEXT NOT NULL DEFAULT '{}',
+             status TEXT NOT NULL DEFAULT 'PENDING', attempts INTEGER NOT NULL DEFAULT 0,
+             not_before REAL NOT NULL DEFAULT 0, publish_id TEXT, last_error TEXT,
+             created_at REAL NOT NULL, updated_at REAL NOT NULL);"""
+    )
+    legacy.execute(
+        """INSERT INTO jobs (idem_key, account, video_path, title, privacy_level,
+                             created_at, updated_at)
+           VALUES ('old','main','/tmp/x.mp4','legacy','SELF_ONLY',0,0)"""
+    )
+    legacy.commit()
+    legacy.close()
+
+    queue = PostQueue(Settings(client_key="k", client_secret="s", state_dir=state))
+    job = next(queue.list_jobs())
+    assert job.title == "legacy"
+    assert job.mode == "direct", "migrated rows must default to the pre-existing behaviour"

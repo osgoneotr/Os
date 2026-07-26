@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     video_path      TEXT NOT NULL,
     title           TEXT NOT NULL,
     privacy_level   TEXT NOT NULL,
+    mode            TEXT NOT NULL DEFAULT 'direct',
     options_json    TEXT NOT NULL DEFAULT '{}',
     status          TEXT NOT NULL DEFAULT 'PENDING',
     attempts        INTEGER NOT NULL DEFAULT 0,
@@ -45,6 +46,13 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_ready ON jobs(status, not_before);
 """
+
+
+class PostMode(str, Enum):
+    """How a job reaches TikTok."""
+
+    DIRECT = "direct"  # publishes immediately; needs the audited video.publish scope
+    INBOX = "inbox"    # lands as a draft for the creator to finish; no audit needed
 
 
 class JobStatus(str, Enum):
@@ -63,6 +71,7 @@ class Job:
     video_path: str
     title: str
     privacy_level: str
+    mode: str
     options: dict[str, Any]
     status: str
     attempts: int
@@ -114,6 +123,21 @@ class PostQueue:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=5000")
         self.db.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Additive migrations for databases created by an earlier version.
+
+        CREATE TABLE IF NOT EXISTS silently leaves an existing table alone, so
+        a queue.db from before a column was added would otherwise fail on every
+        read with 'no such column'.
+        """
+        existing = {row["name"] for row in self.db.execute("PRAGMA table_info(jobs)")}
+        for column, ddl in [
+            ("mode", "ALTER TABLE jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'direct'"),
+        ]:
+            if column not in existing:
+                self.db.execute(ddl)
 
     # ---- enqueue / inspect -------------------------------------------
 
@@ -123,6 +147,7 @@ class PostQueue:
         video_path: Path,
         title: str,
         privacy_level: str = "SELF_ONLY",
+        mode: str = PostMode.DIRECT.value,
         not_before: float | None = None,
         **options: Any,
     ) -> int | None:
@@ -130,17 +155,21 @@ class PostQueue:
         video_path = Path(video_path)
         if not video_path.exists():
             raise FileNotFoundError(video_path)
+        if mode not in {m.value for m in PostMode}:
+            raise ValueError(
+                f"mode must be one of {[m.value for m in PostMode]} (got {mode!r})"
+            )
 
         key = idempotency_key(video_path, title, account)
         now = time.time()
         try:
             cur = self.db.execute(
                 """INSERT INTO jobs
-                   (idem_key, account, video_path, title, privacy_level,
+                   (idem_key, account, video_path, title, privacy_level, mode,
                     options_json, not_before, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    key, account, str(video_path), title, privacy_level,
+                    key, account, str(video_path), title, privacy_level, mode,
                     json.dumps(options),
                     now if not_before is None else not_before,
                     now, now,
@@ -159,6 +188,7 @@ class PostQueue:
             video_path=row["video_path"],
             title=row["title"],
             privacy_level=row["privacy_level"],
+            mode=row["mode"],
             options=json.loads(row["options_json"]),
             status=row["status"],
             attempts=row["attempts"],
@@ -262,7 +292,10 @@ class QueueWorker:
         self.client = client or TikTokClient(settings)
         self.bucket = TokenBucket(settings.rate_limits.requests_per_minute)
         self.window = PostingWindow(
-            settings.rate_limits, Path(settings.state_dir), settings.posting_hours
+            settings.rate_limits,
+            Path(settings.state_dir),
+            settings.posting_hours,
+            jitter_key=settings.client_key,
         )
         self.max_attempts = 5
 
@@ -277,11 +310,16 @@ class QueueWorker:
         if job is None:
             return False
 
-        log.info("Publishing job %d: %s", job.id, Path(job.video_path).name)
+        log.info(
+            "Processing job %d (%s): %s", job.id, job.mode, Path(job.video_path).name
+        )
         self.bucket.acquire(block=True)
 
         try:
-            result = self.client.post_video(job.account, job.to_request())
+            if job.mode == PostMode.INBOX.value:
+                result = self.client.upload_to_inbox(job.account, job.to_request())
+            else:
+                result = self.client.post_video(job.account, job.to_request())
         except TerminalError as exc:
             # Wrong request, not bad luck. Park it for a human.
             log.error("Job %d blocked: %s", job.id, exc)
@@ -308,7 +346,13 @@ class QueueWorker:
             job.id, JobStatus.PUBLISHED, publish_id=result.get("publish_id"), bump_attempts=True
         )
         self.window.record_post()
-        log.info("Job %d published (publish_id=%s)", job.id, result.get("publish_id"))
+        if job.mode == PostMode.INBOX.value:
+            log.info(
+                "Job %d delivered to inbox (publish_id=%s) -- open TikTok to finish it",
+                job.id, result.get("publish_id"),
+            )
+        else:
+            log.info("Job %d published (publish_id=%s)", job.id, result.get("publish_id"))
         return True
 
     def run_forever(self, poll_interval: int = 60) -> None:
