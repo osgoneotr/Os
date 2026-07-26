@@ -206,7 +206,7 @@ figure is an editorial cap for account health, not an API constraint.
 | Video codec | H.264, High profile, level 4.1 |
 | Pixel format | **yuv420p** — a frequent silent-rejection cause |
 | Resolution | 1080×1920 (9:16) |
-| Frame rate | 30 fps (23–60 accepted) |
+| Frame rate | source preserved by default (23–60 accepted) |
 | Audio | AAC, 128 kbps, 44.1 kHz, stereo |
 | `-movflags` | **+faststart** — required for streaming playback |
 | Max size | 4 GB |
@@ -219,6 +219,19 @@ python -m tiktok_pipeline.cli prep --src raw.mp4 --dst out.mp4 --srt captions.sr
 Vertical conversion uses a **blurred fill** rather than black bars by default.
 Black bars read as lazily reposted content and cost retention in the first
 second — exactly where it's most expensive.
+
+Frame rate is **preserved**, not resampled — 60 fps gameplay footage stays at
+60. Pass `--fps 30` if you specifically want to resample.
+
+> **The caption trap.** ffmpeg converts SRT → ASS with `PlayResX: 384,
+> PlayResY: 288`, and libass interprets *every* geometry value — `FontSize`,
+> `MarginV`, `Outline` — in that coordinate space before scaling to the video.
+> Passing pixel values through `force_style` therefore misses by 1920/288 ≈
+> **6.67×**: a 58px font renders ~387px tall and captions land several screen
+> heights off-frame. Worst of all, ffmpeg **exits 0** — you get a valid video
+> with no captions and no error. `srt_to_styled_ass()` rewrites `PlayRes` to
+> the real frame size so values mean pixels, and `tests/test_prep.py` checks
+> burned-in captions by comparing pixels rather than exit codes.
 
 ### Safe zones (1080×1920)
 
@@ -418,12 +431,16 @@ tests/
 ```
 
 **Requires ffmpeg** on PATH for the prep stage (`apt-get install ffmpeg` /
-`brew install ffmpeg`).
+`brew install ffmpeg`). The prep tests skip automatically when it's absent.
 
 ```bash
 pip install -r requirements.txt
 python -m pytest tests/ -q
 ```
+
+`tests/test_pipeline.py` is pure logic and runs in under a second.
+`tests/test_prep.py` shells out to real ffmpeg and takes ~100s, because the
+only honest way to verify this stage is to render video and inspect pixels.
 
 Set `TIKTOK_DRY_RUN=1` to exercise the whole flow — auth, validation, chunk
 planning — without uploading anything.

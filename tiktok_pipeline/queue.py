@@ -103,10 +103,17 @@ class PostQueue:
         self.settings = settings
         db_dir = Path(settings.state_dir)
         db_dir.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(db_dir / "queue.db", check_same_thread=False)
+        # isolation_level=None puts the driver in autocommit mode so we can
+        # issue BEGIN IMMEDIATE by hand. claim_next needs the write lock held
+        # across its SELECT and UPDATE; a deferred transaction (the default)
+        # takes no lock on the SELECT, letting two workers claim the same job.
+        self.db = sqlite3.connect(
+            db_dir / "queue.db", check_same_thread=False, isolation_level=None
+        )
         self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA busy_timeout=5000")
         self.db.executescript(SCHEMA)
-        self.db.commit()
 
     # ---- enqueue / inspect -------------------------------------------
 
@@ -134,10 +141,11 @@ class PostQueue:
                    VALUES (?,?,?,?,?,?,?,?,?)""",
                 (
                     key, account, str(video_path), title, privacy_level,
-                    json.dumps(options), not_before or now, now, now,
+                    json.dumps(options),
+                    now if not_before is None else not_before,
+                    now, now,
                 ),
             )
-            self.db.commit()
             return cur.lastrowid
         except sqlite3.IntegrityError:
             log.info("Skipping duplicate post (idem_key=%s): %s", key, video_path.name)
@@ -160,9 +168,14 @@ class PostQueue:
         )
 
     def claim_next(self, now: float | None = None) -> Job | None:
-        """Atomically take the next due job and mark it IN_FLIGHT."""
+        """Atomically take the next due job and mark it IN_FLIGHT.
+
+        Holds the write lock for the whole read-then-claim so concurrent
+        workers cannot both take the same row.
+        """
         now = now if now is not None else time.time()
-        with self.db:  # transaction
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
             row = self.db.execute(
                 """SELECT * FROM jobs
                    WHERE status = ? AND not_before <= ?
@@ -170,12 +183,19 @@ class PostQueue:
                 (JobStatus.PENDING.value, now),
             ).fetchone()
             if row is None:
+                self.db.execute("ROLLBACK")
                 return None
             self.db.execute(
                 "UPDATE jobs SET status=?, updated_at=? WHERE id=?",
                 (JobStatus.IN_FLIGHT.value, now, row["id"]),
             )
-        return self._row_to_job(row)
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+        job = self._row_to_job(row)
+        job.status = JobStatus.IN_FLIGHT.value  # row was read pre-update
+        return job
 
     def mark(
         self,
@@ -202,7 +222,6 @@ class PostQueue:
             sets.append("attempts=attempts+1")
         vals.append(job_id)
         self.db.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE id=?", vals)
-        self.db.commit()
 
     def list_jobs(self, status: str | None = None) -> Iterator[Job]:
         sql = "SELECT * FROM jobs"
@@ -231,7 +250,6 @@ class PostQueue:
                 cutoff,
             ),
         )
-        self.db.commit()
         return cur.rowcount
 
 

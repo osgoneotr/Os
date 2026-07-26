@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import secrets
 import sys
 import urllib.parse
@@ -87,6 +88,7 @@ def cmd_prep(args, settings: Settings) -> int:
         srt=Path(args.srt) if args.srt else None,
         blur_pad=not args.black_bars,
         max_duration=args.max_duration,
+        fps=args.fps,
     )
     print(f"Rendered {out}")
     problems = validate_for_tiktok(out)
@@ -153,7 +155,12 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("login", help="authorize a TikTok account")
     p.add_argument("--account", required=True, help="local nickname for this account")
-    p.add_argument("--redirect-uri", required=True, help="must match the portal exactly")
+    p.add_argument(
+        "--redirect-uri",
+        default=os.environ.get("TIKTOK_REDIRECT_URI"),
+        required="TIKTOK_REDIRECT_URI" not in os.environ,
+        help="must match the portal exactly; defaults to $TIKTOK_REDIRECT_URI",
+    )
     p.set_defaults(fn=cmd_login)
 
     p = sub.add_parser("check", help="show posting permissions and audit status")
@@ -166,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--srt", help="optional subtitle file to burn in")
     p.add_argument("--black-bars", action="store_true", help="use black bars, not blur pad")
     p.add_argument("--max-duration", type=float)
+    p.add_argument("--fps", type=int, help="resample frame rate; default preserves source")
     p.set_defaults(fn=cmd_prep)
 
     p = sub.add_parser("enqueue", help="add a video to the posting queue")

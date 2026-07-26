@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 
 from tiktok_pipeline import config
-from tiktok_pipeline.client import CreatorInfo, PostRequest, iter_chunk_ranges, plan_chunks
+from tiktok_pipeline.client import (
+    CreatorInfo,
+    PostRequest,
+    iter_chunk_ranges,
+    plan_chunks,
+    validate_request,
+)
 from tiktok_pipeline.config import RateLimits, Settings
 from tiktok_pipeline.errors import ComplianceError, RetryableError, TerminalError, classify
 from tiktok_pipeline.queue import PostQueue, idempotency_key
@@ -51,6 +57,39 @@ def test_oversized_file_rejected():
         plan_chunks(5 * 1024 * MB)
 
 
+@pytest.mark.parametrize("size_mb", [0.5, 3, 4.9, 5, 6, 7, 9, 9.9])
+def test_single_chunk_always_declares_whole_file_size(size_mb):
+    """Regression: 5-10 MB files yielded count=1 with chunk_size=5MB.
+
+    TikTok requires chunk_size == video_size when total_chunk_count is 1, so
+    the mismatch was rejected at init for every clip in that range.
+    """
+    size = int(size_mb * MB)
+    chunk_size, count = plan_chunks(size)
+    if count == 1:
+        assert chunk_size == size, "single chunk must declare the full file size"
+
+
+@pytest.mark.parametrize("size_mb", [0.5, 3, 5, 7, 9, 10, 15, 47, 64, 100, 512, 2048])
+def test_declared_chunking_covers_file_exactly(size_mb):
+    """The declared plan must always describe the real byte layout."""
+    size = int(size_mb * MB)
+    chunk_size, count = plan_chunks(size)
+    ranges = list(iter_chunk_ranges(size, chunk_size, count))
+
+    assert len(ranges) == count
+    assert ranges[0][0] == 0
+    assert ranges[-1][1] == size - 1
+    assert sum(last - first + 1 for first, last in ranges) == size
+
+    for first, last in ranges[:-1]:
+        assert last - first + 1 == chunk_size
+    final = ranges[-1][1] - ranges[-1][0] + 1
+    assert final <= config.MAX_FINAL_CHUNK_BYTES
+    if count > 1:
+        assert config.MIN_CHUNK_BYTES <= chunk_size <= config.MAX_CHUNK_BYTES
+
+
 def test_ranges_cover_entire_file_without_gaps():
     size = 47 * MB + 12345
     chunk_size, count = plan_chunks(size)
@@ -71,14 +110,6 @@ def test_final_chunk_absorbs_remainder_within_limit():
 
 
 # ---- compliance validation -----------------------------------------
-
-def _client():
-    return __import__(
-        "tiktok_pipeline.client", fromlist=["TikTokClient"]
-    ).TikTokClient.__new__(
-        __import__("tiktok_pipeline.client", fromlist=["TikTokClient"]).TikTokClient
-    )
-
 
 UNAUDITED = CreatorInfo(
     nickname="test",
@@ -105,34 +136,37 @@ def test_unaudited_client_cannot_post_publicly():
 
 
 def test_public_post_rejected_for_unaudited_account(tmp_path):
-    client = _client()
     req = PostRequest(video_path=tmp_path / "x.mp4", title="hi",
                       privacy_level="PUBLIC_TO_EVERYONE")
     with pytest.raises(ComplianceError, match="unaudited"):
-        client.validate_request(req, UNAUDITED)
+        validate_request(req, UNAUDITED)
 
 
 def test_overlong_caption_rejected(tmp_path):
-    client = _client()
     req = PostRequest(video_path=tmp_path / "x.mp4", title="x" * 2500,
                       privacy_level="SELF_ONLY")
     with pytest.raises(ComplianceError, match="2200"):
-        client.validate_request(req, UNAUDITED)
+        validate_request(req, UNAUDITED)
 
 
 def test_branded_content_cannot_be_private(tmp_path):
-    client = _client()
     req = PostRequest(video_path=tmp_path / "x.mp4", title="ad",
                       privacy_level="SELF_ONLY", brand_content_toggle=True)
     with pytest.raises(ComplianceError, match="[Bb]randed"):
-        client.validate_request(req, UNAUDITED)
+        validate_request(req, UNAUDITED)
+
+
+def test_overlong_video_rejected_before_upload(tmp_path):
+    req = PostRequest(video_path=tmp_path / "x.mp4", title="long",
+                      privacy_level="SELF_ONLY", duration_sec=900.0)
+    with pytest.raises(ComplianceError, match="600s"):
+        validate_request(req, UNAUDITED)
 
 
 def test_valid_request_passes(tmp_path):
-    client = _client()
     req = PostRequest(video_path=tmp_path / "x.mp4", title="ok",
-                      privacy_level="PUBLIC_TO_EVERYONE")
-    client.validate_request(req, AUDITED)  # must not raise
+                      privacy_level="PUBLIC_TO_EVERYONE", duration_sec=25.0)
+    validate_request(req, AUDITED)  # must not raise
 
 
 # ---- error classification ------------------------------------------
@@ -279,6 +313,52 @@ def test_future_scheduled_job_is_not_claimed(tmp_path):
     queue = PostQueue(_settings(tmp_path))
     queue.enqueue("main", _video(tmp_path), "later", not_before=time.time() + 3600)
     assert queue.claim_next() is None
+
+
+def test_claim_next_is_atomic_under_concurrency(tmp_path):
+    """Regression: deferred transactions let two workers claim the same job."""
+    import threading
+
+    settings = _settings(tmp_path)
+    queue = PostQueue(settings)
+    for i in range(8):
+        queue.enqueue("main", _video(tmp_path, f"c{i}.mp4", bytes([i]) * 4096), f"t{i}")
+
+    claimed: list[int] = []
+    lock = threading.Lock()
+
+    def drain():
+        q = PostQueue(settings)  # separate connection, as a real worker would have
+        while True:
+            job = q.claim_next()
+            if job is None:
+                return
+            with lock:
+                claimed.append(job.id)
+
+    threads = [threading.Thread(target=drain) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sorted(claimed) == sorted(set(claimed)), "a job was claimed twice"
+    assert len(claimed) == 8
+
+
+def test_claimed_job_reports_in_flight_status(tmp_path):
+    queue = PostQueue(_settings(tmp_path))
+    queue.enqueue("main", _video(tmp_path), "one")
+    job = queue.claim_next()
+    assert job is not None
+    assert job.status == "IN_FLIGHT"
+
+
+def test_explicit_zero_not_before_is_honoured(tmp_path):
+    """Regression: `not_before or now` treated an explicit 0 as unset."""
+    queue = PostQueue(_settings(tmp_path))
+    queue.enqueue("main", _video(tmp_path), "epoch", not_before=0.0)
+    assert next(queue.list_jobs()).not_before == 0.0
 
 
 def test_orphaned_inflight_goes_to_blocked_not_pending(tmp_path):

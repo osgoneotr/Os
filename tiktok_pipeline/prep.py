@@ -108,29 +108,86 @@ def build_vertical_filter(safe: SafeZone = DEFAULT_SAFE_ZONE, blur_pad: bool = T
     )
 
 
-def build_caption_filter(
+def _escape_filter_path(path: Path) -> str:
+    """Escape a path for use inside an ffmpeg filter argument."""
+    return str(path).replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
+
+
+def srt_to_styled_ass(
     srt_path: Path,
+    ass_path: Path,
     safe: SafeZone = DEFAULT_SAFE_ZONE,
     font_size: int = 58,
     font_name: str = "Arial Black",
-) -> str:
-    """Burn an SRT as styled subtitles inside the safe zone.
+) -> Path:
+    """Convert an SRT to ASS with a 1080x1920 script resolution and our style.
+
+    This exists because of a trap: ffmpeg converts SRT to ASS with
+    ``PlayResX: 384, PlayResY: 288``, and libass interprets every geometry
+    value -- FontSize, MarginV, Outline -- in *that* coordinate space before
+    scaling to the video. Passing pixel values via ``force_style`` therefore
+    misses by a factor of 1920/288 = 6.67: a 58px font renders ~387px tall,
+    and a MarginV meant to sit mid-frame lands several screen-heights off
+    the top, silently producing a video with no visible captions at all.
+
+    Rewriting PlayRes to the real frame size makes every value mean pixels.
+    """
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("ffmpeg not found on PATH.")
+
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(srt_path), str(ass_path), "-loglevel", "error"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"SRT -> ASS conversion failed:\n{result.stderr[-1000:]}")
+
+    # ASS colours are &HAABBGGRR: AA=00 is opaque, AA=80 half-transparent.
+    margin_h = max(safe.left, safe.right)  # symmetric, so text stays frame-centred
+    margin_v = TARGET_H - safe.caption_y()
+    style = (
+        f"Style: Default,{font_name},{font_size},"
+        f"&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,"
+        f"-1,0,0,0,100,100,0,0,"       # bold on, no italic/underline/strikeout
+        f"1,4,2,"                       # BorderStyle=outline, Outline=4px, Shadow=2px
+        f"2,"                           # Alignment=2 (bottom-centre)
+        f"{margin_h},{margin_h},{margin_v},1"
+    )
+
+    out_lines: list[str] = []
+    for line in ass_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("PlayResX:"):
+            out_lines.append(f"PlayResX: {TARGET_W}")
+        elif line.startswith("PlayResY:"):
+            out_lines.append(f"PlayResY: {TARGET_H}")
+        elif line.startswith("Style: Default,"):
+            out_lines.append(style)
+        else:
+            out_lines.append(line)
+
+    text = "\n".join(out_lines) + "\n"
+    # ffmpeg omits PlayRes entirely for some inputs; inject it if missing.
+    if "PlayResX:" not in text:
+        text = text.replace(
+            "[Script Info]",
+            f"[Script Info]\nPlayResX: {TARGET_W}\nPlayResY: {TARGET_H}",
+            1,
+        )
+    ass_path.write_text(text, encoding="utf-8")
+    return ass_path
+
+
+def build_caption_filter(ass_path: Path) -> str:
+    """Filter string burning a prepared ASS file into the video.
+
+    Takes an ASS produced by :func:`srt_to_styled_ass` -- the styling lives in
+    the file, not in ``force_style``, so the values are in real pixels.
 
     Burned-in captions matter twice: most feed viewing starts muted, and
     TikTok's own auto-captions can land in the overlay zone where they get
-    covered. Styling here mimics the high-contrast look that reads at arm's
-    length on a phone.
+    covered.
     """
-    margin_v = TARGET_H - safe.caption_y()
-    style = (
-        f"FontName={font_name},FontSize={font_size},"
-        f"PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,"
-        f"BorderStyle=1,Outline=4,Shadow=2,"
-        f"Alignment=2,"  # bottom-centre, then lifted by MarginV
-        f"MarginL={safe.left},MarginR={safe.right},MarginV={margin_v}"
-    )
-    escaped = str(srt_path).replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
-    return f"subtitles='{escaped}':force_style='{style}'"
+    return f"ass='{_escape_filter_path(ass_path)}'"
 
 
 def prepare_clip(
@@ -141,22 +198,41 @@ def prepare_clip(
     blur_pad: bool = True,
     max_duration: float | None = None,
     crf: int = 20,
+    fps: int | None = None,
+    font_size: int = 58,
+    font_name: str = "Arial Black",
 ) -> Path:
     """Render a TikTok-ready MP4.
 
     Output: 1080x1920, H.264 high/yuv420p, AAC 128k 44.1kHz stereo, faststart.
     yuv420p and +faststart are the two settings that most often cause an
     otherwise-valid file to be rejected or to stall on playback.
+
+    ``fps`` defaults to None, preserving the source frame rate. Pass an int to
+    resample. TikTok accepts 23-60 fps, so 60 fps sources are best left alone.
     """
     _require_ffmpeg()
     src, dst = Path(src), Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
 
+    if not 1 <= crf <= 51:
+        # crf=0 is lossless, which x264 rejects under -profile:v high with an
+        # opaque "high profile doesn't support lossless" error. TikTok
+        # re-encodes on ingest anyway, so lossless would only waste bandwidth.
+        raise ValueError(f"crf must be between 1 and 51 (got {crf}); 18-23 is the useful range")
+
     chain = build_vertical_filter(safe, blur_pad)
+    tmp_ass: Path | None = None
     if srt is not None:
-        if not Path(srt).exists():
+        srt = Path(srt)
+        if not srt.exists():
             raise FileNotFoundError(f"Subtitle file not found: {srt}")
-        chain = f"{chain},{build_caption_filter(Path(srt), safe)}"
+        if srt.suffix.lower() == ".ass":
+            chain = f"{chain},{build_caption_filter(srt)}"
+        else:
+            tmp_ass = dst.with_suffix(".styled.ass")
+            srt_to_styled_ass(srt, tmp_ass, safe, font_size, font_name)
+            chain = f"{chain},{build_caption_filter(tmp_ass)}"
 
     cmd = ["ffmpeg", "-y", "-i", str(src)]
     if blur_pad:
@@ -173,13 +249,22 @@ def prepare_clip(
         "-c:v", "libx264", "-profile:v", "high", "-level", "4.1",
         "-preset", "medium", "-crf", str(crf),
         "-pix_fmt", "yuv420p",
-        "-r", "30", "-g", "60",
+    ]
+    if fps is not None:
+        # Only resample when asked. Forcing 30 unconditionally would throw away
+        # half the frames of 60 fps gameplay footage, which is exactly the
+        # source material this pipeline is aimed at.
+        cmd += ["-r", str(fps), "-g", str(fps * 2)]
+
+    cmd += [
         "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
         "-movflags", "+faststart",
         str(dst),
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True)
+    if tmp_ass is not None:
+        tmp_ass.unlink(missing_ok=True)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg failed:\n{result.stderr[-2000:]}")
     return dst

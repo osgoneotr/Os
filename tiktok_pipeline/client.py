@@ -26,9 +26,19 @@ import requests
 
 from . import config
 from .auth import TokenStore
-from .errors import ComplianceError, RetryableError, TikTokError, classify
+from .errors import ComplianceError, RetryableError, classify
 
-TERMINAL_STATUSES = {"PUBLISH_COMPLETE", "FAILED"}
+# Terminal states worth stopping on. SEND_TO_USER_INBOX is the success state
+# for the video.upload (draft) flow -- it never becomes PUBLISH_COMPLETE,
+# because the creator finishes the post by hand, so omitting it here would make
+# the recommended semi-automated path poll until it times out.
+TERMINAL_STATUSES = {"PUBLISH_COMPLETE", "SEND_TO_USER_INBOX", "FAILED"}
+
+MIME_BY_SUFFIX = {
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+}
 
 
 @dataclass
@@ -79,6 +89,9 @@ class PostRequest:
     # AI-assisted "brainrot" output this is the honest setting and it does not
     # suppress reach the way an undisclosed-AI takedown does.
     is_aigc: bool = False
+    # Optional. When set, checked against the creator's max duration locally so
+    # an over-length video fails before it uploads rather than after.
+    duration_sec: float | None = None
 
 
 def plan_chunks(file_size: int) -> tuple[int, int]:
@@ -108,6 +121,14 @@ def plan_chunks(file_size: int) -> tuple[int, int]:
         chunk_size = min(chunk_size, config.MAX_CHUNK_BYTES)
         count = file_size // chunk_size
 
+    if count == 1:
+        # A single chunk must declare the whole file as its size. Files from
+        # 5 MB up to just under 10 MB land here: 5 MB <= size < 2 * 5 MB gives
+        # count == 1, and declaring chunk_size=5MB against a 9 MB video is an
+        # init-time rejection. The lone chunk is also the final chunk, so it
+        # may run to 128 MB -- well clear of the <10 MB sizes that reach here.
+        chunk_size = file_size
+
     return int(chunk_size), int(count)
 
 
@@ -117,6 +138,40 @@ def iter_chunk_ranges(file_size: int, chunk_size: int, count: int) -> Iterator[t
         first = i * chunk_size
         last = file_size - 1 if i == count - 1 else first + chunk_size - 1
         yield first, last
+
+
+def validate_request(req: PostRequest, info: CreatorInfo) -> None:
+    """Fail fast on anything TikTok would reject, before any upload happens.
+
+    Module-level so it can be tested without constructing a client or touching
+    the network -- every check here is pure.
+    """
+    if req.privacy_level not in info.privacy_level_options:
+        raise ComplianceError(
+            f"privacy_level {req.privacy_level!r} is not offered for this account. "
+            f"TikTok returned: {info.privacy_level_options}. "
+            + (
+                "No public option means your client is unaudited or the account "
+                "is set to private -- posting will be SELF_ONLY regardless."
+                if not info.can_post_publicly
+                else ""
+            )
+        )
+
+    if len(req.title) > config.MAX_TITLE_RUNES:
+        raise ComplianceError(
+            f"Caption is {len(req.title)} runes; limit is {config.MAX_TITLE_RUNES}."
+        )
+
+    if req.brand_content_toggle and req.privacy_level == "SELF_ONLY":
+        raise ComplianceError("Branded content cannot be posted with SELF_ONLY visibility.")
+
+    if info.max_video_post_duration_sec and req.duration_sec:
+        if req.duration_sec > info.max_video_post_duration_sec:
+            raise ComplianceError(
+                f"Video is {req.duration_sec:.1f}s but this creator's limit is "
+                f"{info.max_video_post_duration_sec}s."
+            )
 
 
 class TikTokClient:
@@ -167,32 +222,8 @@ class TikTokClient:
         """Step 1. Always call this before posting."""
         return CreatorInfo.parse(self._post(config.CREATOR_INFO_URL, account, {}))
 
-    def validate_request(self, req: PostRequest, info: CreatorInfo) -> None:
-        """Fail fast on anything TikTok would reject, before any upload happens."""
-        if req.privacy_level not in info.privacy_level_options:
-            raise ComplianceError(
-                f"privacy_level {req.privacy_level!r} is not offered for this account. "
-                f"TikTok returned: {info.privacy_level_options}. "
-                + (
-                    "No public option means your client is unaudited or the account "
-                    "is set to private -- posting will be SELF_ONLY regardless."
-                    if not info.can_post_publicly
-                    else ""
-                )
-            )
-
-        if len(req.title) > config.MAX_TITLE_RUNES:
-            raise ComplianceError(
-                f"Caption is {len(req.title)} runes; limit is {config.MAX_TITLE_RUNES}."
-            )
-
-        if req.brand_content_toggle and req.privacy_level == "SELF_ONLY":
-            raise ComplianceError(
-                "Branded content cannot be posted with SELF_ONLY visibility."
-            )
-
-        if req.disable_comment and info.comment_disabled:
-            pass  # already off account-wide; harmless
+    # Kept as a method for call-site convenience; delegates to the pure function.
+    validate_request = staticmethod(validate_request)
 
     def init_video_post(self, account: str, req: PostRequest, file_size: int) -> dict[str, Any]:
         """Step 2. Returns {publish_id, upload_url}."""
@@ -231,7 +262,13 @@ class TikTokClient:
     ) -> None:
         """Step 3. PUT each chunk with a Content-Range header."""
         file_size = path.stat().st_size
-        mime = "video/mp4" if path.suffix.lower() == ".mp4" else "video/quicktime"
+        suffix = path.suffix.lower()
+        if suffix not in MIME_BY_SUFFIX:
+            raise ComplianceError(
+                f"Unsupported container {suffix!r}. TikTok accepts "
+                f"{', '.join(sorted(MIME_BY_SUFFIX))}."
+            )
+        mime = MIME_BY_SUFFIX[suffix]
 
         with path.open("rb") as fh:
             for idx, (first, last) in enumerate(
@@ -308,7 +345,7 @@ class TikTokClient:
             raise ComplianceError(f"Video not found: {req.video_path}")
 
         info = self.query_creator_info(account)
-        self.validate_request(req, info)
+        validate_request(req, info)
 
         file_size = req.video_path.stat().st_size
 
