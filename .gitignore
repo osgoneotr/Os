@@ -1,0 +1,17 @@
+.env
+.tiktok_state/
+*.db
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Media working dirs
+raw/
+out/
+*.mp4
+*.mov
+*.webm
+!tests/fixtures/*.mp4

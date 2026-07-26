@@ -1,0 +1,4 @@
+requests>=2.31.0
+
+# Dev
+pytest>=8.0.0
