@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clipper"
+version = "0.1.0"
+description = "Find and cut the most engaging segments of a long video into vertical, captioned short-form clips."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+# Local transcription (CPU or CUDA). ~200MB of wheels + model download on first run.
+whisper = ["faster-whisper>=1.0"]
+# Hosted transcription fallback, useful on machines that cannot run whisper locally.
+openai = ["openai>=1.30"]
+# Subject tracking for the `track` reframe mode.
+track = ["opencv-python-headless>=4.9"]
+# Ships a static ffmpeg build so the tool works without a system ffmpeg.
+ffmpeg = ["imageio-ffmpeg>=0.4.9"]
+# LLM-written captions/hashtags instead of the default heuristic generator.
+llm = ["anthropic>=0.40"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+clipper = "clipper.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["clipper*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
