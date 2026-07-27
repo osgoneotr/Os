@@ -1,0 +1,257 @@
+# =====================================================================
+# resell-autopilot — all tunable numbers live here.
+# Edit this file, not the code.
+#
+# IMPORTANT: every fee/postage number below has a `last_verified` date.
+# Marketplace fees change. Before you rely on a profit number, re-check
+# the rate on the platform's own fee page and update it here.
+# =====================================================================
+
+business:
+  currency: GBP
+  region: UK
+  base_location: "Slough, Berkshire"
+  # Total cash you are willing to have tied up in unsold stock at once.
+  working_capital_gbp: 200.00
+  # Never pay more than this for a single item while starting out.
+  max_buy_price_gbp: 25.00
+  # HMRC: you can earn £1,000/yr gross from trading before you must file a
+  # Self Assessment return. Vinted/eBay report seller data to HMRC once you
+  # pass ~30 sales or ~£1,700 in a year (OECD/DAC7 rules). This is a
+  # reminder, not tax advice — the reports script warns you as you approach it.
+  hmrc_trading_allowance_gbp: 1000.00
+
+# ---------------------------------------------------------------------
+# Which channel we sell each category on, in priority order.
+# ---------------------------------------------------------------------
+channels:
+  priority: [vinted, ebay_uk, facebook, gumtree]
+  # A lower-priority channel has to beat your first-choice channel's net profit
+  # by at least this much before the system recommends switching to it.
+  # Without this, Facebook wins everything on paper (no fees, no postage) even
+  # though it reaches a fraction of the buyers and needs you to meet a stranger.
+  switch_threshold_pct: 15
+
+  vinted:
+    enabled: true
+    # Vinted UK charges the SELLER nothing. The buyer pays a Buyer
+    # Protection fee and the postage. So your net = the price you set.
+    seller_fee_pct: 0.0
+    seller_fee_fixed_gbp: 0.0
+    postage_paid_by: buyer            # buyer | seller | none
+    buyer_pays_courier_directly: true # Vinted books the label; you never pay it
+    # What this channel's audience pays relative to eBay sold comps (our
+    # pricing baseline). 1.0 = the same.
+    price_multiplier: 1.00
+    title_max_chars: 100
+    description_max_chars: 3000
+    max_photos: 20
+    last_verified: "2026-07-01"
+
+  ebay_uk:
+    enabled: true
+    # Since Oct 2024 eBay UK private sellers pay no selling fees in most
+    # categories (the buyer pays a Buyer Protection fee instead).
+    # If you ever register as a BUSINESS seller, switch seller_type below
+    # and the 12.8% + £0.30 model kicks in.
+    seller_type: private        # private | business
+    private:
+      seller_fee_pct: 0.0
+      seller_fee_fixed_gbp: 0.0
+    business:
+      seller_fee_pct: 12.8
+      seller_fee_fixed_gbp: 0.30
+    postage_paid_by: buyer
+    # Default false on purpose: "free postage" listings convert far better on
+    # eBay, so we assume you absorb the label cost. That makes every profit
+    # figure conservative. Flip to true only if you really do charge postage
+    # on top and the buyer covers it in full.
+    postage_charged_covers_cost: false
+    price_multiplier: 1.00
+    title_max_chars: 80
+    description_max_chars: 4000
+    max_photos: 24
+    last_verified: "2026-07-01"
+
+  facebook:
+    enabled: true
+    # Local collection, cash on pickup — no fees at all.
+    seller_fee_pct: 0.0
+    seller_fee_fixed_gbp: 0.0
+    postage_paid_by: none       # local pickup only
+    # Local cash buyers expect a discount for collecting — pricing a Facebook
+    # listing at the eBay sold price is how items sit there for six months.
+    price_multiplier: 0.78
+    title_max_chars: 100
+    description_max_chars: 5000
+    max_photos: 10
+    last_verified: "2026-07-01"
+
+  gumtree:
+    # Sourcing channel only — we buy here, we don't list here.
+    enabled: false
+    sourcing_only: true
+
+# ---------------------------------------------------------------------
+# UK postage bands. Cost to YOU to send the parcel.
+# Pick the cheapest tracked option you'll actually use.
+# ---------------------------------------------------------------------
+postage:
+  last_verified: "2026-07-01"
+  packaging_cost_gbp:
+    bag: 0.35
+    box: 0.75
+  bands:
+    large_letter:      { max_kg: 0.75, cost_gbp: 2.29, desc: "Evri Large Letter / RM 2nd LL" }
+    small_parcel_1kg:  { max_kg: 1.0,  cost_gbp: 2.85, desc: "Evri Small Parcel to 1kg" }
+    small_parcel_2kg:  { max_kg: 2.0,  cost_gbp: 3.15, desc: "Evri Small Parcel to 2kg" }
+    medium_parcel_5kg: { max_kg: 5.0,  cost_gbp: 4.50, desc: "Evri Medium Parcel to 5kg" }
+    large_parcel_10kg: { max_kg: 10.0, cost_gbp: 7.50, desc: "Evri Large Parcel to 10kg" }
+  # Default band per category if we can't infer one.
+  default_band_by_category:
+    trainers: small_parcel_2kg
+    clothing: small_parcel_1kg
+    retro_tech: small_parcel_2kg
+    audio: medium_parcel_5kg
+
+# ---------------------------------------------------------------------
+# How we turn market evidence into an estimated resale price.
+# ---------------------------------------------------------------------
+pricing:
+  # Drop this fraction from each end of the comp sample before averaging.
+  trim_fraction: 0.10
+  # Hard outlier guard: ignore comps outside these multiples of the median.
+  outlier_low_multiple: 0.33
+  outlier_high_multiple: 3.0
+  # Minimum comps before we'll call a price "confident".
+  min_comps_high_confidence: 8
+  min_comps_medium_confidence: 4
+  # Active eBay listings are ASKING prices, not sold prices. Multiply by this
+  # to approximate what things actually sell for. Only used on the
+  # active-listings path; sold-comp CSVs need no calibration.
+  active_to_sold_ratio:
+    default: 0.78
+    trainers: 0.75
+    clothing: 0.74
+    retro_tech: 0.80
+    audio: 0.82
+  # Where we aim inside the comp range when suggesting a list price.
+  # 0.5 = median, 1.0 = top of the trimmed range.
+  list_price_percentile: 0.62
+  # Floor price you'll accept from an offer, as a fraction of list price.
+  min_price_fraction: 0.72
+  # Condition multipliers applied to the comp-derived price.
+  condition_multiplier:
+    new_with_tags: 1.15
+    new_without_tags: 1.05
+    excellent: 1.00
+    good: 0.88
+    fair: 0.70
+    for_parts: 0.40
+
+# ---------------------------------------------------------------------
+# The buy/pass rule. An item must clear ALL of these to be a BUY.
+# ---------------------------------------------------------------------
+thresholds:
+  min_net_profit_gbp: 8.00      # absolute floor — sub-£8 isn't worth the postage run
+  min_margin_pct: 35.0          # net profit / list price
+  min_roi_pct: 100.0            # net profit / buy price — double your money
+  # Below this many comps we return REVIEW instead of BUY, even if the
+  # numbers look great — the numbers just aren't trustworthy yet.
+  min_comps_for_auto_buy: 5
+  # Items we won't touch regardless of margin.
+  target_sell_through_days: 45
+  stale_after_days: 60
+
+# ---------------------------------------------------------------------
+# Safety. These are checked before anything is written to a listing CSV.
+# ---------------------------------------------------------------------
+safety:
+  # Words that suggest a category we won't sell (counterfeits, restricted
+  # goods, anything needing a licence). Match = item is blocked with a reason.
+  blocked_keywords:
+    - replica
+    - "1:1"
+    - unauthorised authentic
+    - "ua batch"
+    - reps
+    - knock off
+    - counterfeit
+    - airsoft
+    - pepper spray
+    - taser
+    - stun gun
+    - prescription
+    - vape
+    - e-liquid
+    - "car seat"          # UK: used child car seats — unknown crash history
+    - "cycle helmet"      # same reasoning
+    - "motorcycle helmet"
+    - "smoke alarm"
+    - "co detector"
+  # Claims we must never make unless we can physically prove them.
+  banned_claims:
+    - "100% authentic"
+    - "guaranteed genuine"
+    - "certificate of authenticity"
+    - "brand new"          # unless condition == new_with_tags
+    - "fully working"      # unless tested_confirmed is true
+    - "never worn"         # unless condition is new_*
+  # Brands with no resale floor. Whatever the comps say, these get a PASS:
+  # the postage and your time cost more than the item will ever fetch.
+  no_resale_floor_brands:
+    - primark
+    - shein
+    - george
+    - "f&f"
+    - tu
+    - matalan
+    - atmosphere
+    - papaya
+    - "boohoo"
+    - "pretty little thing"
+    - "shein x"
+  # Attributes that must be evidenced (photo or data) before they can appear
+  # in a title or description. Unevidenced = stripped + warning.
+  attributes_needing_evidence:
+    - brand
+    - model
+    - size
+    - material
+    - year
+    - colourway
+    - "working condition"
+
+# ---------------------------------------------------------------------
+# eBay Browse API (free developer account). Optional — the CSV path works
+# without any of this. Keys go in .env, never in this file.
+# ---------------------------------------------------------------------
+ebay_api:
+  enabled: true
+  marketplace_id: EBAY_GB
+  oauth_url: "https://api.ebay.com/identity/v1/oauth2/token"
+  browse_url: "https://api.ebay.com/buy/browse/v1/item_summary/search"
+  scope: "https://api.ebay.com/oauth/api_scope"
+  page_size: 100
+  max_pages: 3
+  # Sold/completed data lives behind the Marketplace Insights API, which
+  # needs an extra application to eBay. If you get approved, set this true.
+  marketplace_insights_enabled: false
+  marketplace_insights_url: "https://api.ebay.com/buy/marketplace_insights/v1_beta/item_sales/search"
+
+http:
+  timeout_seconds: 20
+  max_retries: 4
+  backoff_seconds: [2, 4, 8, 16]
+  user_agent: "resell-autopilot/1.0 (+personal reselling research)"
+
+paths:
+  # Candidate items you're thinking of buying (CSV).
+  inbox: "data/inbox"
+  # Sold-listing evidence: exported CSVs, or eBay "Sold items" pages saved
+  # with Ctrl+S. Kept in its own folder so a comps file is never mistaken
+  # for a list of things to buy.
+  comps: "data/inbox/comps"
+  out: "data/out"           # generated CSVs land here
+  ledger: "data/ledger.csv" # the single source of truth for inventory
+  log: "data/out/run.log"

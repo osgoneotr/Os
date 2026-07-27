@@ -6,3 +6,12 @@ node_modules
 *.log
 *.tsbuildinfo
 next-env.d.ts
+
+# resell-autopilot
+resell-autopilot/.env
+resell-autopilot/data/ledger.csv
+resell-autopilot/data/ledger.csv.bak
+resell-autopilot/data/out/
+resell-autopilot/data/inbox/*.html
+__pycache__/
+*.pyc

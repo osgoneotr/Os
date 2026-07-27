@@ -1,0 +1,82 @@
+# Sourcing seeds: retro tech & audio (secondary category)
+#
+# Why this pairs well with clothing: it uses a completely different supply
+# (house clearances, garages, older sellers) so you're not competing with the
+# same people, and model numbers make pricing near-mechanical — a Sony
+# WM-FX290 is a Sony WM-FX290 and the comps are unambiguous. Clothing pricing
+# is a judgement call; this is a lookup.
+
+category: retro_tech
+max_buy_price_gbp: 25.00
+
+queries:
+  untested:
+    - "vintage amplifier untested"
+    - "hifi separates spares repair"
+    - "walkman untested"
+    - "record player untested"
+    - "vintage camera untested"
+  misspellings:
+    - "techincs"
+    - "technics turntable"        # control search
+    - "sansui amplifier"
+    - "marantz reciever"
+    - "sonny walkman"
+    - "canon ae1"
+    - "cannon ae-1"
+  clearance:
+    - "house clearance electronics"
+    - "job lot cables adapters"
+    - "retro games bundle"
+  local:
+    - "hifi collection only slough"
+    - "speakers collection only reading"
+
+# Things that reliably hold value. The pattern to internalise: pre-1995 audio
+# with real wood/metal casing, and anything with a cult following.
+model_triage:
+  tier_1:
+    - { item: "Technics SL-1200/1210 turntable", typical_resale_gbp: [300, 700], note: "Rare in the wild; grab at any price under £150." }
+    - { item: "Sony WM-D6C / DD-series Walkman", typical_resale_gbp: [150, 500] }
+    - { item: "Vintage Japanese silver-face amps (Sansui, Marantz, Pioneer, Rotel)", typical_resale_gbp: [60, 300] }
+    - { item: "Canon AE-1 / Olympus Trip 35 / Pentax K1000", typical_resale_gbp: [50, 180] }
+  tier_2:
+    - { item: "Sennheiser HD-series headphones", typical_resale_gbp: [25, 90] }
+    - { item: "Boxed retro consoles (N64, GameCube, Game Boy)", typical_resale_gbp: [40, 150] }
+    - { item: "Denon/Yamaha AV receivers (working)", typical_resale_gbp: [30, 90] }
+    - { item: "Vintage bookshelf speakers (Wharfedale, Mission, KEF)", typical_resale_gbp: [30, 120] }
+  tier_3:
+    - { item: "Proprietary cables, PSUs, remotes for tier-1/2 kit", typical_resale_gbp: [8, 30], note: "Tiny, light, near-zero postage, and people search for them by part number. Best margin-per-gram in the whole business." }
+    - { item: "Boxed accessories, manuals, original packaging", typical_resale_gbp: [5, 25] }
+
+avoid:
+  - "CRT TVs and large speakers — postage is impossible, local-only, low value."
+  - "Anything mains-powered with damaged insulation, exposed wiring, a cracked
+     case or a burning smell. UK electrical safety rules apply to sellers; a
+     dangerous item is a real liability, not just a bad listing."
+  - "Printers. Nobody wants them."
+  - "Laptops/phones with accounts still signed in (iCloud/Google locks make
+     them worthless, and you can't verify the lock without the password)."
+  - "Anything that looks stolen: no box, no charger, several identical units,
+     seller vague about provenance."
+
+# The one rule that keeps you out of trouble in this category.
+testing_policy:
+  rule: >
+    Either power the item on and confirm it works before you list it as
+    working, or list it explicitly as UNTESTED and price it as untested.
+    There is no third option. The quality gate enforces this: it will not let
+    "fully working" through unless tested_confirmed is set.
+  untested_discount: 0.45   # what "untested" is worth vs a tested unit
+  what_testing_means:
+    - "Powers on and holds power for 10+ minutes."
+    - "Audio: sound from both channels, at volume, no crackle on the pots."
+    - "Turntables: platter spins at the right speed, tonearm tracks."
+    - "Cameras: shutter fires at all speeds, no fungus in the lens (shine a
+       torch through it), light seals intact."
+
+inspection_checklist:
+  - "Photograph the model number plate. That photo is your pricing evidence."
+  - "Open the battery compartment — corrosion there kills the value."
+  - "Check for the smell of burnt electronics. Walk away if present."
+  - "Count what's missing: remote, PSU, feet, dust cover. Each one is £10–40 off."

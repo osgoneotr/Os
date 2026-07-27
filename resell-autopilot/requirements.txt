@@ -1,0 +1,11 @@
+# Hard requirement — config parsing.
+PyYAML>=6.0
+
+# Optional. Without it, the toolkit falls back to urllib from the standard
+# library, which works fine; requests just gives better connection reuse.
+requests>=2.31
+
+# Optional — only needed for `--sheets` (real Google Sheets API sync).
+# Without these, use `--tsv` and paste into a Sheet manually.
+# gspread>=6.0
+# google-auth>=2.30

@@ -1,0 +1,91 @@
+# Sourcing seeds: trainers & branded clothing (primary category)
+#
+# `queries` feed the eBay sourcing script directly. Each one is a search
+# designed to surface listings the market has not properly priced.
+#
+# Why these work, briefly:
+#  - misspellings   : a listing spelt "Carhart" never appears in the searches
+#                     everyone else runs, so it goes cheap. This is the single
+#                     highest-yield trick in online arbitrage and it is entirely
+#                     within the rules — you're just searching better.
+#  - bundle/joblot  : sellers clearing a wardrobe price the lot, not the items.
+#  - vague titles   : "mens jacket size L" with no brand named, where the brand
+#                     is visible in the photos. Requires you to look at photos.
+#  - collection only: excludes 90% of bidders. You're in Slough with the M4 and
+#                     the Elizabeth line — a big chunk of West London is inside
+#                     45 minutes.
+
+category: trainers_clothing
+max_buy_price_gbp: 25.00
+
+queries:
+  misspellings:
+    - "carhart jacket"
+    - "carharrt"
+    - "north fase"
+    - "the north face jacket mens"      # control search, for comparison
+    - "stone island jumper"
+    - "ralph laurent"
+    - "nike air max trainers used"
+    - "adidas sambas uk 9"
+    - "arcteryx"
+    - "arc teryx jacket"
+    - "patagoina fleece"
+    - "berghause jacket"
+  bundles:
+    - "mens clothes bundle size L"
+    - "trainers joblot"
+    - "vintage clothing bundle"
+    - "job lot mens jackets"
+  vague:
+    - "mens jacket vintage no brand"
+    - "trainers uk 9 used"
+  local:
+    - "clothes bundle collection only slough"
+    - "trainers collection only reading"
+
+# Brands worth stopping for in a charity shop. Rough resale bands for a
+# clean, mid-size item in good condition — always confirm with real comps
+# before buying; these are for triage speed, not pricing.
+brand_triage:
+  tier_1:      # grab it, almost always worth listing
+    - { brand: "Arc'teryx",     typical_resale_gbp: [60, 220] }
+    - { brand: "Stone Island",  typical_resale_gbp: [70, 250] }
+    - { brand: "Patagonia",     typical_resale_gbp: [35, 120] }
+    - { brand: "Barbour",       typical_resale_gbp: [40, 150] }
+    - { brand: "Carhartt WIP",  typical_resale_gbp: [35, 110] }
+  tier_2:      # worth it if it's clean and a common size
+    - { brand: "The North Face", typical_resale_gbp: [25, 90] }
+    - { brand: "Ralph Lauren",   typical_resale_gbp: [18, 60] }
+    - { brand: "Berghaus",       typical_resale_gbp: [20, 65] }
+    - { brand: "Levi's 501",     typical_resale_gbp: [18, 45] }
+    - { brand: "Nike ACG",       typical_resale_gbp: [25, 80] }
+  tier_3:      # only at pocket-change prices, or in a bundle
+    - { brand: "Nike",   typical_resale_gbp: [12, 35] }
+    - { brand: "Adidas", typical_resale_gbp: [12, 35] }
+    - { brand: "Lyle & Scott", typical_resale_gbp: [10, 25] }
+
+# Sizes that sell fastest. Buying a men's UK 12 or an XS jacket means holding
+# it for months, whatever the brand.
+fast_moving_sizes:
+  trainers_uk: ["8", "9", "10", "7"]
+  mens_tops: ["M", "L"]
+  womens_tops: ["S", "M", "8", "10", "12"]
+
+# Hard passes regardless of price.
+avoid:
+  - "Fast-fashion own-brands (Primark, Shein, George, F&F) — no resale floor."
+  - "Anything with a fake-looking neck label, glued (not stitched) seams, or a
+     Made in ___ tag that doesn't match the brand's factories."
+  - "Football shirts unless you can verify authenticity — the fake rate is enormous."
+  - "Underwear, swimwear, socks — hygiene rules on most platforms."
+  - "Anything with a smell. It never comes out and it always gets returned."
+
+# Condition checks to run before you hand over money.
+inspection_checklist:
+  - "Armpits and cuffs — the two places wear shows first."
+  - "Zips: run every one end to end."
+  - "Trainers: press the midsole. Crumbling foam on 90s stock is unfixable."
+  - "Trainers: check the size tag inside the tongue matches the box, if boxed."
+  - "Photograph the brand label and the size label — those two photos are your
+     evidence, and the quality gate asks for them."
