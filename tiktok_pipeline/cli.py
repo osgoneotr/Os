@@ -27,7 +27,7 @@ from pathlib import Path
 
 from .auth import TokenStore, exchange_code
 from .client import TikTokClient
-from .config import REQUIRED_SCOPES, Settings
+from .config import DIRECT_SCOPES, INBOX_SCOPES, Settings
 from .prep import DEFAULT_SAFE_ZONE, prepare_clip, validate_for_tiktok
 from .queue import PostMode, PostQueue, QueueWorker
 
@@ -37,10 +37,11 @@ AUTH_BASE = "https://www.tiktok.com/v2/auth/authorize/"
 def cmd_login(args, settings: Settings) -> int:
     """Print the consent URL, then exchange the pasted code for tokens."""
     redirect_uri = args.redirect_uri
+    scopes = DIRECT_SCOPES if args.with_direct else INBOX_SCOPES
     state = secrets.token_urlsafe(16)
     params = {
         "client_key": settings.client_key,
-        "scope": ",".join(REQUIRED_SCOPES),
+        "scope": ",".join(scopes),
         "response_type": "code",
         "redirect_uri": redirect_uri,
         "state": state,
@@ -61,9 +62,11 @@ def cmd_login(args, settings: Settings) -> int:
     TokenStore(settings).save(args.account, tokens)
     print(f"\nSaved tokens for account {args.account!r}.")
     print(f"Granted scopes: {tokens.scope}")
-    missing = [s for s in REQUIRED_SCOPES if not tokens.has_scope(s)]
+    missing = [s for s in scopes if not tokens.has_scope(s)]
     if missing:
         print(f"WARNING: missing scopes {missing} -- posting will fail.")
+    else:
+        print("\nNext: python -m tiktok_pipeline.cli check --account " + args.account)
     return 0
 
 
@@ -266,6 +269,12 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("TIKTOK_REDIRECT_URI"),
         required="TIKTOK_REDIRECT_URI" not in os.environ,
         help="must match the portal exactly; defaults to $TIKTOK_REDIRECT_URI",
+    )
+    p.add_argument(
+        "--with-direct",
+        action="store_true",
+        help="also request video.publish; only works if your app is already "
+             "approved for that scope, otherwise authorization fails",
     )
     p.set_defaults(fn=cmd_login)
 

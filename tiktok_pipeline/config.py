@@ -27,8 +27,16 @@ INBOX_INIT_URL = f"{API_BASE}/post/publish/inbox/video/init/"
 STATUS_FETCH_URL = f"{API_BASE}/post/publish/status/fetch/"
 TOKEN_URL = f"{API_BASE}/oauth/token/"
 
-# Scopes needed for the full pipeline. video.publish is the audited one.
-REQUIRED_SCOPES = ("user.info.basic", "video.publish", "video.upload")
+# Scopes for the inbox (draft) route -- neither is gated behind the audit, so
+# this is what a fresh app can actually be granted.
+INBOX_SCOPES = ("user.info.basic", "video.upload")
+
+# Adds direct posting. video.publish must be enabled for your app in the
+# developer portal first; requesting a scope your app does not hold makes the
+# authorize call fail outright, which is why it is not requested by default.
+DIRECT_SCOPES = ("user.info.basic", "video.upload", "video.publish")
+
+REQUIRED_SCOPES = INBOX_SCOPES
 
 # Media transfer rules, from the Content Posting API media transfer guide.
 MIN_CHUNK_BYTES = 5 * 1024 * 1024  # 5 MB

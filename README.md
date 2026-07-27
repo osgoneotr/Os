@@ -2,6 +2,9 @@
 
 Clip prep → queue → post, built against TikTok's Content Posting API.
 
+**New here? Start with [QUICKSTART.md](QUICKSTART.md)** — setup and daily use in
+six steps. This file is the reference and the compliance reasoning.
+
 **Read the compliance summary before you build on this.** The headline finding
 is that the fully-automated public-posting path you asked about is very likely
 to fail TikTok's audit — not because of your content, but because of what the
@@ -142,16 +145,20 @@ requires Business.
 
 ### Step 3 — Request scopes
 
-| Scope | Purpose | Audited? |
-|---|---|---|
-| `user.info.basic` | open_id, nickname | No |
-| `video.upload` | Upload to drafts/inbox | No |
-| `video.publish` | **Direct post** | **Yes** |
-| `video.list` | Read your own posts | No |
+| Scope | Purpose | Audited? | Requested by default |
+|---|---|---|---|
+| `user.info.basic` | open_id, nickname | No | Yes |
+| `video.upload` | Upload to drafts/inbox | No | Yes |
+| `video.publish` | **Direct post** | **Yes** | No — `--with-direct` |
+| `video.list` | Read your own posts | No | No |
 
-`video.publish` is the one gated behind audit. `video.upload` sends a video to
-the user's TikTok inbox for them to finish manually — that's the mechanism
-behind the recommended fallback in §5.
+`video.publish` is the one gated behind audit, and `login` does **not** request
+it by default: asking for a scope your app has not been granted makes the
+authorize call fail outright, which would block setup on the very first step.
+Add it in the developer portal first, then use `login --with-direct`.
+
+`video.upload` sends a video to the creator's TikTok inbox to finish manually —
+that's the mechanism behind `--mode inbox`, the default route.
 
 ### Step 4 — Credentials
 
