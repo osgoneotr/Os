@@ -198,3 +198,62 @@ exhausted; `BLOCKED` means it needs you to look at it.
 You've been through the dry run, so the remaining unknown is TikTok's live
 response. Do the first real one with `work --once` and watch the output rather
 than leaving `work` running unattended.
+
+---
+
+## Windows (including ROG Ally / Ally X)
+
+Everything works the same; only the shell commands differ.
+
+**Install** — in PowerShell:
+
+```powershell
+winget install Python.Python.3.12
+winget install Gyan.FFmpeg
+```
+
+Close and reopen PowerShell afterwards so both land on your PATH, then:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+If activation is blocked, allow local scripts once:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+**Credentials** — the `export $(grep ...)` line is bash-only. Use this instead:
+
+```powershell
+Get-Content .env | Where-Object { $_ -match '=' -and $_ -notmatch '^#' } |
+  ForEach-Object { $k,$v = $_ -split '=',2; [Environment]::SetEnvironmentVariable($k,$v) }
+```
+
+Or just set them for the session:
+
+```powershell
+$env:TIKTOK_CLIENT_KEY="aw..."
+$env:TIKTOK_CLIENT_SECRET="..."
+$env:TIKTOK_REDIRECT_URI="https://localhost:8080/callback"
+```
+
+**Use relative paths**, as the examples here do:
+
+```powershell
+python -m tiktok_pipeline.cli batch --account main --src-dir raw\ --out-dir out\
+```
+
+Absolute Windows paths contain a drive-letter colon (`C:\...`), which is a
+separator inside ffmpeg filter arguments and has to be escaped. Relative paths
+avoid the problem entirely. If captions ever come out missing on Windows, an
+absolute path is the first thing to suspect.
+
+**On a handheld specifically:** dock it or pair a keyboard for setup — the
+first run involves pasting an authorization code, which is miserable on a
+touch keyboard. Day to day it's two commands, so the built-in keyboard is
+fine after that. Rendering is CPU-heavy; expect fans and battery drain, so
+run `batch` plugged in.

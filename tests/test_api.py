@@ -12,6 +12,7 @@ where this layer actually goes wrong.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -431,6 +432,10 @@ def test_valid_token_is_not_refreshed(tmp_path, monkeypatch):
     assert store.get_valid("main").access_token == "live"
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX permission bits; Windows uses ACLs and chmod is a near no-op",
+)
 def test_token_file_is_not_world_readable(tmp_path):
     settings = Settings(client_key="k", client_secret="s", state_dir=tmp_path)
     TokenStore(settings).save("main", TokenSet("a", "r", time.time() + 100))
