@@ -87,12 +87,22 @@ retention data (see DESIGN.md, v3).
 
 | mode | use for |
 |---|---|
-| `center` | anything already framed centrally |
+| `track` **(default)** | talking heads and interviews; follows the face (or motion) with a smoothed crop path |
 | `blur_pad` | screen shares, b-roll, two-shots — keeps the whole frame over a blurred background |
-| `track` | talking heads that move; follows the face (or motion) with a smoothed crop path |
+| `center` | anything already framed centrally; cheapest |
 
-`track` needs the `track` extra; without it, it warns and falls back to `center`
-rather than failing the render.
+The default is `track`, which needs the `track` extra — **install it**
+(`pip install -e '.[whisper,track]'`) or every render warns and falls back to
+`center`. In a two-shot it follows the largest face, which is usually but not
+always the active speaker.
+
+## Throughput
+
+Defaults suit a few hours of footage a week on a laptop. For several hours a
+day, set `transcribe.device` to a CUDA GPU (`auto` already detects one and
+picks `float16`) and raise `transcribe.model` to `large-v3` — realtime on a
+GPU, and more accurate on proper nouns, which matters because ASR errors land
+directly in burned-in captions. See DESIGN.md v2 for the queue/worker plan.
 
 ## Configuration
 

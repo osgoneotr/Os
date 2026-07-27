@@ -75,7 +75,10 @@ class RenderConfig:
     width: int = 1080
     height: int = 1920
     fps: int | None = None  # None = keep source fps
-    reframe: str = "center"  # center | blur_pad | track
+    reframe: str = "track"  # center | blur_pad | track
+    """Defaults to subject tracking, which is the right mode for talking-head
+    and interview footage. Requires the `track` extra; without OpenCV it warns
+    and falls back to a centre crop rather than failing the render."""
     crf: int = 20
     preset: str = "medium"
     audio_bitrate: str = "160k"

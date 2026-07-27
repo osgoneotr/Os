@@ -161,20 +161,47 @@ video through real ffmpeg.
 
 **Deliberately deferred:** discovery, any platform account, any hosted service.
 
-### v2 — discovery feeds the clipper
+### v2 — all three platforms, and throughput
 
-1. **YouTube first** (the only open trending API). `TrendProvider` protocol +
-   SQLite observation store + velocity ranking.
-2. **Instagram hashtag `top_media`** as a topic signal, with a deliberate
-   rotation plan for the 30-hashtag/7-day budget.
-3. **TikTok**: Research API if eligible, else a licensed vendor, else the
-   curated-seed-accounts fallback.
-4. **Close the loop:** a trend report emits niche keywords and hashtag sets
+Scoped to the answers in *Operating parameters* below: all three platforms,
+several hours of footage per day, talking-head/interview source.
+
+**Discovery** — build in this order, because it is also the order of
+decreasing certainty:
+
+1. **YouTube** (`TrendProvider` protocol, SQLite observation store, velocity
+   ranking). The only provider that works on day one with nothing but a free
+   API key, so it also proves out the store and the ranking that the other two
+   reuse.
+2. **Instagram** hashtag `top_media`. Cheap to add once the store exists. The
+   real work is a **rotation schedule** for the 30-unique-hashtags-per-7-days
+   budget — treat those slots as an allocated resource, not a query param.
+3. **TikTok** last, because it is the only one that can be blocked on something
+   other than code. Decide the path *before* building: Research API if you
+   qualify (US/EU academic or non-profit), else a licensed vendor, else the
+   curated-seed-accounts fallback. Behind the same `TrendProvider` protocol,
+   so the choice stays swappable.
+4. **Close the loop.** A trend report emits niche keywords and hashtag sets
    *into the clipper's config*, so scoring and copy follow what is currently
-   working. This is the actual integration point between stages 1 and 2 — not
+   working. This is the integration point between stages 1 and 2 — signal, not
    video.
-5. Ergonomics: batch mode over a folder, a proper preview UI (a local web page
-   beats scrubbing mp4s), and `yt-dlp` ingest **restricted to your own channel**.
+
+**Throughput** — several hours/day is past what the MVP's defaults assume:
+
+5. **GPU transcription.** `device=auto` already selects CUDA + `float16`; on a
+   GPU, raise `transcribe.model` to `large-v3`, which is comfortably realtime
+   there and materially more accurate on proper nouns — which matters, because
+   ASR errors surface directly in burned-in captions.
+6. **Job queue and worker.** One process per source doesn't hold up at this
+   volume. The stages are already separable (`analyze` is split from `run` for
+   exactly this reason): queue per-source analysis, then fan out per-clip
+   renders, which are independent and CPU-bound.
+7. **Retention/output storage.** Start recording what you posted *now*, even
+   before anything consumes it — v3's learned ranker cannot be built
+   retroactively.
+
+**Ergonomics:** batch mode over a folder, a local preview page (beats scrubbing
+mp4s), and `yt-dlp` ingest **restricted to your own channel**.
 
 ### v3 — learn from results
 
@@ -194,15 +221,22 @@ video through real ffmpeg.
 
 ---
 
-## Open questions that would change these recommendations
+## Operating parameters
 
-- **Platform priority.** YouTube-only makes discovery ~5× simpler (real API vs.
-  application or vendor). TikTok-first means budgeting for the Research API
-  application or a vendor from day one.
-- **Volume.** A handful of long videos a week is a laptop CPU job. Dozens a day
-  changes transcription (GPU `large-v3`), storage, and the case for a queue.
-- **Niche.** Drives the keyword lexicon and hashtag sets, and it changes reframe
-  defaults: talking-head → `track`; screen-share/tutorial → `blur_pad`;
-  centred-studio → `center`.
-- **Source footage.** Whether it's your own long-form content (the assumption
-  here) or licensed/stock material changes the ingest path.
+Confirmed, and already reflected in the defaults and in v2 above.
+
+| | Decision | What it changes |
+|---|---|---|
+| **Platforms** | All three | TikTok is the only one that can block on something other than code — settle Research API vs. vendor vs. seed accounts before building it. Instagram's 30-hashtag/7-day cap needs a rotation schedule. Build YouTube first regardless: it proves out the store and ranking the other two reuse. |
+| **Volume** | Several hours/day | Past the MVP's laptop assumption. GPU + `large-v3`, and a queue that fans out per-clip renders. Items 5–7 in v2. |
+| **Footage** | Talking head / interview | `render.reframe` now defaults to **`track`** — install the `track` extra, or it warns and falls back to a centre crop on every render. |
+
+Still worth pinning down when you get there:
+
+- **Niche/subject area** — populates `scoring.niche_keywords` and
+  `output.base_hashtags`. Cheap to set, and it moves the ranking more than any
+  weight tweak, because it is the only part of the lexicon that knows what your
+  content is actually about.
+- **Multi-speaker interviews** — if two-shots are common, `track` follows the
+  largest face, which is usually but not always the active speaker. Proper
+  active-speaker detection is the v3 item to pull forward.
