@@ -296,21 +296,46 @@ hashtags beats 15 generic ones. Skip `#fyp` — it does nothing.
 
 ## 4. Scheduling & Queue
 
-```bash
-# Draft to your TikTok inbox -- no audit, can be public after you tap post
-python -m tiktok_pipeline.cli enqueue --account main --video out.mp4 --title "hook here" --mode inbox
+### Everyday workflow
 
-# Or direct post (needs the audit for anything but SELF_ONLY)
-python -m tiktok_pipeline.cli enqueue --account main --video out.mp4 --title "hook here" --mode direct --privacy SELF_ONLY
+Drop raw clips in a folder and run one command:
+
+```bash
+python -m tiktok_pipeline.cli batch --account main --src-dir raw/ --out-dir out/
+python -m tiktok_pipeline.cli work
+```
+
+`batch` preps every clip to TikTok specs and queues it. Sidecars are matched by
+filename, so `clipA.mp4` automatically picks up:
+
+| Sidecar | Purpose |
+|---|---|
+| `clipA.srt` (or `.ass`) | captions, burned in inside the safe zone |
+| `clipA.txt` | the caption text; falls back to the filename |
+
+It's safe to re-run — already-prepped clips are reused and already-queued ones
+skipped, so nothing gets rendered twice or posted twice. One bad clip is
+reported and skipped rather than aborting the batch.
+
+`work` then drains the queue on schedule. Each video arrives as a notification
+in your TikTok app; you paste the caption, tap post.
+
+### Single clip
+
+```bash
+python -m tiktok_pipeline.cli prep --src raw.mp4 --dst out.mp4 --srt caps.srt
+python -m tiktok_pipeline.cli enqueue --account main --video out.mp4 --title "hook here"
 
 python -m tiktok_pipeline.cli work --once     # process one job
-python -m tiktok_pipeline.cli work            # run continuously
 python -m tiktok_pipeline.cli status
 ```
 
+Jobs default to `--mode inbox`. Pass `--mode direct --privacy SELF_ONLY` to
+publish via the API instead.
+
 ### Two posting modes
 
-| | `--mode inbox` | `--mode direct` |
+| | `--mode inbox` (default) | `--mode direct` |
 |---|---|---|
 | Endpoint | `/v2/post/publish/inbox/video/init/` | `/v2/post/publish/video/init/` |
 | Scope | `video.upload` | `video.publish` |
@@ -464,7 +489,7 @@ tiktok_pipeline/
 ├── retry.py        Full-jitter exponential backoff
 ├── queue.py        SQLite queue, idempotency, worker
 ├── prep.py         ffmpeg: 9:16, safe zones, burned captions
-└── cli.py          login / check / prep / enqueue / work / status
+└── cli.py          login / check / prep / batch / enqueue / work / status
 tests/
 ├── test_pipeline.py   queue, rate limits, chunking, validation  (fast)
 ├── test_api.py        API wire format against a stubbed transport (fast)

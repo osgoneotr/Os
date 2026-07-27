@@ -241,3 +241,151 @@ def test_lossless_crf_rejected_with_clear_message(source_16x9, tmp_path):
     """crf=0 fails deep inside x264 with an opaque profile error; catch it early."""
     with pytest.raises(ValueError, match="crf must be between"):
         prepare_clip(source_16x9, tmp_path / "out.mp4", crf=0)
+
+
+# ---- batch workflow --------------------------------------------------
+
+@pytest.fixture
+def cli_env(tmp_path, monkeypatch):
+    """cli.main() builds Settings from the environment, so point it at tmp_path."""
+    monkeypatch.setenv("TIKTOK_CLIENT_KEY", "k")
+    monkeypatch.setenv("TIKTOK_CLIENT_SECRET", "s")
+    monkeypatch.setenv("TIKTOK_STATE_DIR", str(tmp_path / "state"))
+    return tmp_path
+
+
+@pytest.fixture
+def tiny_source(tmp_path):
+    """Factory for short clips -- keeps batch tests from dominating runtime."""
+    # 4s: TikTok rejects anything under 3s, and validate_for_tiktok enforces it,
+    # so a 1s fixture would fail validation rather than test the batch logic.
+    def make(name: str, size: str = "640x360", seconds: int = 4) -> Path:
+        dst = tmp_path / "raw" / name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi",
+             "-i", f"testsrc2=size={size}:rate=30:duration={seconds}",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dst), "-loglevel", "error"],
+            check=True,
+        )
+        return dst
+    return make
+
+
+@needs_ffmpeg
+def test_batch_preps_and_queues_every_clip(cli_env, tiny_source, tmp_path):
+    from tiktok_pipeline.cli import main
+
+    tiny_source("a.mp4")
+    tiny_source("b.mp4")
+    out = tmp_path / "out"
+
+    rc = main([
+        "batch", "--account", "main",
+        "--src-dir", str(tmp_path / "raw"), "--out-dir", str(out),
+    ])
+    assert rc == 0
+    assert {p.name for p in out.glob("*.mp4")} == {"a.mp4", "b.mp4"}
+
+    from tiktok_pipeline.config import Settings
+    from tiktok_pipeline.queue import PostQueue
+    jobs = list(PostQueue(Settings(client_key="k", client_secret="s",
+                                   state_dir=tmp_path / "state")).list_jobs())
+    assert len(jobs) == 2
+    assert all(j.mode == "inbox" for j in jobs), "batch must default to the no-audit route"
+
+
+@needs_ffmpeg
+def test_batch_uses_title_sidecar(cli_env, tiny_source, tmp_path):
+    from tiktok_pipeline.cli import main
+    from tiktok_pipeline.config import Settings
+    from tiktok_pipeline.queue import PostQueue
+
+    src = tiny_source("hooky.mp4")
+    src.with_suffix(".txt").write_text("  real caption here #niche  ")
+
+    main(["batch", "--account", "main", "--src-dir", str(src.parent),
+          "--out-dir", str(tmp_path / "out")])
+
+    job = next(PostQueue(Settings(client_key="k", client_secret="s",
+                                  state_dir=tmp_path / "state")).list_jobs())
+    assert job.title == "real caption here #niche", "sidecar text must be stripped and used"
+
+
+@needs_ffmpeg
+def test_batch_falls_back_to_filename_for_title(cli_env, tiny_source, tmp_path):
+    from tiktok_pipeline.cli import main
+    from tiktok_pipeline.config import Settings
+    from tiktok_pipeline.queue import PostQueue
+
+    src = tiny_source("no_sidecar.mp4")
+    main(["batch", "--account", "main", "--src-dir", str(src.parent),
+          "--out-dir", str(tmp_path / "out")])
+
+    job = next(PostQueue(Settings(client_key="k", client_secret="s",
+                                  state_dir=tmp_path / "state")).list_jobs())
+    assert job.title == "no_sidecar"
+
+
+@needs_ffmpeg
+def test_batch_rerun_is_idempotent(cli_env, tiny_source, tmp_path):
+    """Re-running must not re-render or double-queue -- duplicates get posted."""
+    from tiktok_pipeline.cli import main
+    from tiktok_pipeline.config import Settings
+    from tiktok_pipeline.queue import PostQueue
+
+    tiny_source("a.mp4")
+    args = ["batch", "--account", "main", "--src-dir", str(tmp_path / "raw"),
+            "--out-dir", str(tmp_path / "out")]
+    main(args)
+    main(args)
+
+    jobs = list(PostQueue(Settings(client_key="k", client_secret="s",
+                                   state_dir=tmp_path / "state")).list_jobs())
+    assert len(jobs) == 1
+
+
+@needs_ffmpeg
+def test_batch_survives_one_bad_clip(cli_env, tiny_source, tmp_path):
+    """A corrupt file must not abort the whole batch."""
+    from tiktok_pipeline.cli import main
+    from tiktok_pipeline.config import Settings
+    from tiktok_pipeline.queue import PostQueue
+
+    tiny_source("good.mp4")
+    (tmp_path / "raw" / "broken.mp4").write_bytes(b"this is not a video")
+
+    rc = main(["batch", "--account", "main", "--src-dir", str(tmp_path / "raw"),
+               "--out-dir", str(tmp_path / "out")])
+    assert rc == 1, "a failure must be reported in the exit code"
+
+    jobs = list(PostQueue(Settings(client_key="k", client_secret="s",
+                                   state_dir=tmp_path / "state")).list_jobs())
+    assert [Path(j.video_path).name for j in jobs] == ["good.mp4"]
+
+
+@needs_ffmpeg
+def test_batch_picks_up_matching_srt(cli_env, tiny_source, tmp_path):
+    from tiktok_pipeline.cli import main
+
+    src = tiny_source("capped.mp4", seconds=4)
+    (src.parent / "capped.srt").write_text(
+        "1\n00:00:00,200 --> 00:00:02,000\nburned in\n"
+    )
+    out = tmp_path / "out"
+    main(["batch", "--account", "main", "--src-dir", str(src.parent), "--out-dir", str(out)])
+
+    plain = prepare_clip(src, tmp_path / "plain.mp4")
+    delta = _band_delta(
+        plain, out / "capped.mp4",
+        DEFAULT_SAFE_ZONE.text_top,
+        DEFAULT_SAFE_ZONE.text_bottom - DEFAULT_SAFE_ZONE.text_top,
+    )
+    assert delta > PIXEL_NOISE_FLOOR, "sidecar .srt was not burned in"
+
+
+def test_batch_rejects_missing_directory(cli_env, tmp_path, capsys):
+    from tiktok_pipeline.cli import main
+    rc = main(["batch", "--account", "main", "--src-dir", str(tmp_path / "nope"),
+               "--out-dir", str(tmp_path / "out")])
+    assert rc == 1

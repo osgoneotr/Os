@@ -2,10 +2,17 @@
 
     python -m tiktok_pipeline.cli login    --account main
     python -m tiktok_pipeline.cli check    --account main
-    python -m tiktok_pipeline.cli prep     --src raw.mp4 --dst out.mp4 --srt caps.srt
-    python -m tiktok_pipeline.cli enqueue  --account main --video out.mp4 --title "..."
-    python -m tiktok_pipeline.cli work     --once
+    python -m tiktok_pipeline.cli batch    --account main --src-dir raw/ --out-dir out/
+    python -m tiktok_pipeline.cli work
     python -m tiktok_pipeline.cli status
+
+`batch` is the everyday command: it preps every clip in a folder and queues it.
+Single-clip equivalents are `prep` and `enqueue`.
+
+Jobs default to inbox mode -- the video lands as a draft in your TikTok app for
+you to caption and post. That needs no audit and can be public. Pass
+`--mode direct` to publish via the API instead, which is capped to SELF_ONLY
+until your audit clears.
 """
 
 from __future__ import annotations
@@ -72,12 +79,19 @@ def cmd_check(args, settings: Settings) -> int:
     print(f"Duet disabled:      {info.duet_disabled}")
     print(f"Stitch disabled:    {info.stitch_disabled}")
 
-    print("\n--- Audit status ---")
+    print("\n--- Posting routes ---")
     if info.can_post_publicly:
-        print("PUBLIC POSTING AVAILABLE. Your client appears audited for this account.")
+        print("direct: PUBLIC available -- this account appears audited.")
     else:
-        print("SELF_ONLY ONLY. Either your app is unaudited, or this account is private.")
-        print("Posts will be visible to you alone until the audit clears.")
+        print("direct: SELF_ONLY only -- app unaudited or account is private.")
+        print("        Automated posts stay visible to you alone.")
+    print("inbox:  always available with the video.upload scope. Lands as a")
+    print("        draft; you tap post in the app and it can be public.")
+
+    token = client.tokens.load(args.account)
+    if not token.has_scope("video.upload"):
+        print("\nWARNING: this token lacks the video.upload scope, so inbox mode")
+        print("will fail. Re-run login to grant it.")
     return 0
 
 
@@ -126,6 +140,89 @@ def cmd_enqueue(args, settings: Settings) -> int:
     else:
         print(f"Queued job {job_id} for direct post with privacy_level={args.privacy}")
     return 0
+
+
+VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
+
+
+def cmd_batch(args, settings: Settings) -> int:
+    """Prep every clip in a directory and queue it.
+
+    Sidecars are matched by filename stem, so ``clip01.mp4`` picks up
+    ``clip01.srt`` for captions and ``clip01.txt`` for the caption text.
+    """
+    src_dir, out_dir = Path(args.src_dir), Path(args.out_dir)
+    if not src_dir.is_dir():
+        print(f"Not a directory: {src_dir}", file=sys.stderr)
+        return 1
+    out_dir.mkdir(parents=True, exist_ok=True)
+    srt_dir = Path(args.srt_dir) if args.srt_dir else src_dir
+
+    sources = sorted(
+        p for p in src_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in VIDEO_SUFFIXES
+    )
+    if not sources:
+        print(f"No video files in {src_dir}")
+        return 1
+
+    queue = PostQueue(settings)
+    prepped = queued = skipped = 0
+    failures: list[tuple[Path, str]] = []
+
+    for src in sources:
+        dst = out_dir / f"{src.stem}.mp4"
+        srt = next(
+            (srt_dir / f"{src.stem}{ext}" for ext in (".srt", ".ass")
+             if (srt_dir / f"{src.stem}{ext}").exists()),
+            None,
+        )
+        title_file = src.with_suffix(".txt")
+        title = title_file.read_text().strip() if title_file.exists() else src.stem
+
+        try:
+            if dst.exists() and not args.force:
+                print(f"  {src.name}: already prepped, reusing {dst.name}")
+            else:
+                prepare_clip(src, dst, srt=srt, fps=args.fps)
+                prepped += 1
+                caps = f" + {srt.name}" if srt else " (no captions)"
+                print(f"  {src.name}: prepped{caps}")
+
+            problems = validate_for_tiktok(dst)
+            if problems:
+                failures.append((src, "; ".join(problems)))
+                continue
+
+            job_id = queue.enqueue(
+                account=args.account,
+                video_path=dst,
+                title=title,
+                mode=args.mode,
+                privacy_level=args.privacy,
+                is_aigc=args.aigc,
+            )
+            if job_id is None:
+                skipped += 1
+                print(f"  {src.name}: already queued, skipped")
+            else:
+                queued += 1
+                print(f"  {src.name}: queued as job {job_id}")
+        except Exception as exc:  # keep going; one bad clip shouldn't stop the batch
+            failures.append((src, str(exc)))
+            print(f"  {src.name}: FAILED -- {exc}", file=sys.stderr)
+
+    print(
+        f"\n{prepped} prepped, {queued} queued, {skipped} duplicates skipped, "
+        f"{len(failures)} failed"
+    )
+    if failures:
+        print("\nFailures:")
+        for src, why in failures:
+            print(f"  {src.name}: {why[:200]}")
+    if queued:
+        print("\nNext: python -m tiktok_pipeline.cli work")
+    return 1 if failures else 0
 
 
 def cmd_work(args, settings: Settings) -> int:
@@ -193,12 +290,29 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--mode",
         choices=[m.value for m in PostMode],
-        default=PostMode.DIRECT.value,
-        help="direct = publish now (needs audit for public); "
-             "inbox = draft for you to finish in the app (no audit)",
+        default=PostMode.INBOX.value,
+        help="inbox (default) = draft for you to finish in the app, no audit, "
+             "can be public; direct = publish via API, capped to SELF_ONLY "
+             "until your audit clears",
     )
     p.add_argument("--aigc", action="store_true", help="mark as AI-generated content")
     p.set_defaults(fn=cmd_enqueue)
+
+    p = sub.add_parser("batch", help="prep and queue a whole directory of clips")
+    p.add_argument("--account", required=True)
+    p.add_argument("--src-dir", required=True, help="folder of raw clips")
+    p.add_argument("--out-dir", required=True, help="where prepped clips are written")
+    p.add_argument("--srt-dir", help="captions folder; defaults to --src-dir")
+    p.add_argument(
+        "--mode",
+        choices=[m.value for m in PostMode],
+        default=PostMode.INBOX.value,
+    )
+    p.add_argument("--privacy", default="SELF_ONLY", help="direct mode only")
+    p.add_argument("--fps", type=int, help="resample frame rate; default preserves source")
+    p.add_argument("--aigc", action="store_true", help="mark all as AI-generated")
+    p.add_argument("--force", action="store_true", help="re-render clips already prepped")
+    p.set_defaults(fn=cmd_batch)
 
     p = sub.add_parser("work", help="drain the posting queue")
     p.add_argument("--once", action="store_true")

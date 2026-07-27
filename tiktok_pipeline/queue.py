@@ -147,7 +147,9 @@ class PostQueue:
         video_path: Path,
         title: str,
         privacy_level: str = "SELF_ONLY",
-        mode: str = PostMode.DIRECT.value,
+        # Inbox is the default: it needs no audit and reaches a public post,
+        # where direct is capped to SELF_ONLY until the audit clears.
+        mode: str = PostMode.INBOX.value,
         not_before: float | None = None,
         **options: Any,
     ) -> int | None:

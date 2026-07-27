@@ -432,9 +432,18 @@ def test_next_allowed_time_lands_on_an_open_slot(tmp_path):
 
 # ---- posting mode ----------------------------------------------------
 
-def test_enqueue_defaults_to_direct_mode(tmp_path):
+def test_enqueue_defaults_to_inbox_mode(tmp_path):
+    """Defaulting to inbox is deliberate: it needs no audit and can be public,
+    where direct silently caps everything to SELF_ONLY until the audit clears.
+    Defaulting the other way would post invisible videos by surprise."""
     queue = PostQueue(_settings(tmp_path))
     queue.enqueue("main", _video(tmp_path), "t")
+    assert next(queue.list_jobs()).mode == "inbox"
+
+
+def test_direct_mode_is_explicit_opt_in(tmp_path):
+    queue = PostQueue(_settings(tmp_path))
+    queue.enqueue("main", _video(tmp_path), "t", mode="direct")
     assert next(queue.list_jobs()).mode == "direct"
 
 
